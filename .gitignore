@@ -1,0 +1,9 @@
+.env
+data/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+artifacts/
+*.engine.lock
+node_modules/

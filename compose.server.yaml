@@ -1,0 +1,37 @@
+# Uses the existing Caddy network on the GIMM server.
+x-common: &common
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    APP_ORIGIN: https://copier-engine.gimmholding.com
+    DATABASE_PATH: /app/data/copier.db
+    PORT: '8080'
+    PYTHONUNBUFFERED: '1'
+  volumes:
+    - ./data:/app/data
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+services:
+  app:
+    <<: *common
+    networks:
+      proxy:
+        aliases:
+          - trade-copier-app
+  engine:
+    <<: *common
+    command: [python, -m, copier.engine]
+    networks:
+      - default
+    healthcheck:
+      test: [CMD, python, -c, "from copier import store; import json,time; r=store.one(\"SELECT value FROM engine_status WHERE key='heartbeat'\"); assert r and time.time()-json.loads(r['value'])<20"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+networks:
+  proxy:
+    external: true
+    name: gimmholding-credentials_default

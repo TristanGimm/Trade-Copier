@@ -1,0 +1,4 @@
+-r requirements.txt
+playwright==1.60.0
+grpcio-tools==1.78.0
+selenium==4.36.0

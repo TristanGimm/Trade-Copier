@@ -1,0 +1,4 @@
+cryptography==46.0.7
+protobuf==6.33.6
+
+tzdata>=2025.1,<2027
