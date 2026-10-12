@@ -13,10 +13,10 @@ Managing several accounts manually requires repeating entries and subsequent cha
 Supported scope: one master, up to ten followers, and XAU/USD on hedging accounts. Account configuration includes Pepperstone and FTMO. FTMO capital is classified as simulated. The English interface calls followers **Slave**, while the internal API and database retain `follower`.
 
 - cTrader OAuth and account discovery across multiple cTrader IDs.
-- Confirmed new master entries copied as follower market positions.
+- Confirmed market entries plus mirrored limit, stop and stop-limit orders, with their protection, amendments and cancellations.
 - SL/TP synchronization, proportional partial closes, and full closes.
 - Detection of manual follower changes and restoration of master SL/TP management.
-- Account overview, position mappings, connection diagnostics, and activity log.
+- Combined portfolio equity and trading return (amount and percentage) since connection, with Berlin-day and period filters; position mappings, connection diagnostics, and activity log.
 - Trade journal, equity recording, analytics, and CSV export based on broker data.
 - Configurable technical protection rules and an emergency stop.
 - Per-follower loss displays that do not trigger trading commands.
@@ -89,7 +89,7 @@ Access is designed for a private administrator. Passwords use PBKDF2-SHA256 with
 ## Behavior and limitations
 
 - **Pause:** Stops new copies. Existing mappings still receive protection and closing changes. `ENGINE_TRADING_ENABLED=false` disables every trading command, including emergency closes.
-- **Execution:** Unfilled pending orders are not copied. Their fills trigger market entries. Follower execution prices may differ; absolute SL/TP prices are synchronized after the fill.
+- **Execution:** New limit, stop and stop-limit entry orders are mirrored before execution, with fixed follower lots and SL/TP. Existing pending orders at startup are not copied retroactively. Each broker executes independently; prices and fill timing can differ. Fills reuse the pending mapping without a second market entry.
 - **Reconnection:** Existing mappings are reconciled. Unmapped master positions created during an outage are not copied later.
 - **Emergency stop:** Closes every position and cancels pending orders on assigned followers, including manual trades and other instruments. The master remains unchanged. An unavailable broker connection prevents immediate liquidation.
 - **Protection rules:** May close follower positions independently of the master, for example when a position lacks an SL for too long. Defaults and reset conditions are documented in the operating guide.

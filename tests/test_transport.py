@@ -109,3 +109,16 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         feed(124,2,0);await asyncio.sleep(.01);self.assertFalse(task.done())
         feed(123,2,0);self.assertEqual((await task).position.positionStatus,2)
         read.cancel();await asyncio.gather(read,return_exceptions=True)
+
+    async def test_pending_acceptance_confirms_order_without_waiting_for_fill(self):
+        connection=Connection('live',lambda *_:None);connection.alive=True;connection.writer=Writer();connection.reader=asyncio.StreamReader()
+        request=M.ProtoOANewOrderReq(ctidTraderAccountId=1,symbolId=10,orderType=2,tradeSide=1,volume=100,limitPrice=3000,label='gimm:limit',clientOrderId='limit')
+        task=asyncio.create_task(connection.request(request,trade=True,timeout=1))
+        await asyncio.sleep(.01)
+        event=M.ProtoOAExecutionEvent(ctidTraderAccountId=1,executionType=2)
+        event.order.orderId=10;event.order.orderType=2;event.order.orderStatus=1;event.order.clientOrderId='limit'
+        event.order.tradeData.symbolId=10;event.order.tradeData.volume=100;event.order.tradeData.tradeSide=1
+        raw=C.ProtoMessage(payloadType=event.payloadType,payload=event.SerializeToString()).SerializeToString()
+        read=asyncio.create_task(connection._read());connection.reader.feed_data(struct.pack('!I',len(raw))+raw)
+        result=await asyncio.wait_for(task,1);self.assertEqual(result.order.orderId,10)
+        read.cancel();await asyncio.gather(read,return_exceptions=True)

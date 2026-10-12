@@ -64,3 +64,9 @@ class BrokerFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.ensure_connections();add_account('live:1','master',1);await self.engine.initialize_account(store.account('live:1'))
         await self.engine.history(store.account('live:1'));self.engine.history_time.clear();await self.engine.history(store.account('live:1'))
         deals=store.rows('SELECT * FROM deals');self.assertEqual(len(deals),1);self.assertEqual(deals[0]['net'],95.5)
+    async def test_negative_conversion_fee_is_a_cost(self):
+        add_account('live:1','master',1)
+        detail=Model.ProtoOAClosePositionDetail(entryPrice=3000,grossProfit=2192,swap=0,commission=-52,balance=997013,moneyDigits=2,pnlConversionFee=-16)
+        deal=Model.ProtoOADeal(dealId=1,orderId=1,positionId=1,volume=1000,filledVolume=1000,symbolId=10,createTimestamp=1,executionTimestamp=1,tradeSide=2,dealStatus=2,closePositionDetail=detail,moneyDigits=2)
+        self.engine.save_deal(store.account('live:1'),deal)
+        self.assertAlmostEqual(store.one('SELECT net FROM deals')['net'],21.24)

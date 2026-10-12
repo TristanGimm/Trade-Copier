@@ -42,6 +42,18 @@ def close_confirmed(request,event,target):
     if event.ctidTraderAccountId!=request.ctidTraderAccountId or p.positionId!=request.positionId:return False
     return p.positionStatus==2 or (target>0 and p.positionStatus==1 and p.tradeData.volume<=target)
 
+def pending_confirmed(request,event):
+    if not isinstance(event,M.ProtoOAExecutionEvent) or event.errorCode or not event.HasField('order'):return False
+    if event.ctidTraderAccountId!=getattr(request,'ctidTraderAccountId',None):return False
+    order=event.order
+    if isinstance(request,M.ProtoOANewOrderReq) and request.orderType in (2,3,6):
+        return order.orderStatus in (1,2) and order.clientOrderId==request.clientOrderId and bool(request.clientOrderId)
+    if isinstance(request,M.ProtoOAAmendOrderReq):
+        if order.orderId!=request.orderId or event.executionType!=4:return False
+        return all(not request.HasField(k) or (order.HasField(k) and getattr(order,k)==getattr(request,k)) for k in ('limitPrice','stopPrice','stopLoss','takeProfit','relativeStopLoss','relativeTakeProfit','expirationTimestamp','slippageInPoints'))
+    if isinstance(request,M.ProtoOACancelOrderReq):return order.orderId==request.orderId and order.orderStatus in (4,5)
+    return False
+
 class RateLimiter:
     def __init__(self,limit=45):
         self.limit=limit; self.times=collections.deque(); self.lock=asyncio.Lock()
@@ -119,7 +131,7 @@ class Connection:
                 # Protection updates may arrive without clientMsgId. A broker position
                 # with the exact requested pair proves the desired state, unlike ORDER_ACCEPTED alone.
                 if not pending and isinstance(message,M.ProtoOAExecutionEvent):
-                    candidates=[(key,req) for key,req in self.pending_requests.items() if protection_confirmed(req,message) or close_confirmed(req,message,self.pending_targets.get(key))]
+                    candidates=[(key,req) for key,req in self.pending_requests.items() if protection_confirmed(req,message) or close_confirmed(req,message,self.pending_targets.get(key)) or pending_confirmed(req,message)]
                     if len(candidates)==1:
                         correlation,matched_request=candidates[0];pending=self.pending.get(correlation);matched_target=self.pending_targets.get(correlation)
                 is_error=isinstance(message,(M.ProtoOAErrorRes,M.ProtoOAOrderErrorEvent,C.ProtoErrorRes))
@@ -128,7 +140,7 @@ class Connection:
                 if pending:
                     future,trade=pending
                     # ORDER_ACCEPTED is not a confirmed fill. Wait for final execution.
-                    terminal=not trade or is_error or not isinstance(message,M.ProtoOAExecutionEvent) or message.executionType in (3,4,5,6) or protection_confirmed(matched_request,message) or close_confirmed(matched_request,message,matched_target)
+                    terminal=not trade or is_error or not isinstance(message,M.ProtoOAExecutionEvent) or message.executionType in (3,4,5,6) or protection_confirmed(matched_request,message) or close_confirmed(matched_request,message,matched_target) or pending_confirmed(matched_request,message)
                     if terminal and not future.done():
                         if is_error: future.set_exception(BrokerError(getattr(message,'errorCode','BROKER_ERROR')))
                         else: future.set_result(message)

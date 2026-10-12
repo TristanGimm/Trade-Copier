@@ -79,6 +79,11 @@ def init():
         columns={r[1] for r in c.execute('PRAGMA table_info(mappings)')}
         for name in ('protection_initialized','sl_override','tp_override'):
             if name not in columns:c.execute('ALTER TABLE mappings ADD COLUMN '+name+' INTEGER NOT NULL DEFAULT 0')
+        for name in ('master_order','follower_order'):
+            if name not in columns:c.execute('ALTER TABLE mappings ADD COLUMN '+name+' INTEGER')
+        c.execute('''CREATE TABLE IF NOT EXISTS master_orders(
+            account_id TEXT,order_id INTEGER,payload BLOB,status INTEGER,updated INTEGER,
+            PRIMARY KEY(account_id,order_id))''')
         c.execute("INSERT OR IGNORE INTO settings VALUES('paused','true')")
 
 def rows(query, args=()):
@@ -106,10 +111,29 @@ def setting(key, default=None):
 def account(account_id):
     return one('SELECT * FROM accounts WHERE id=?',(account_id,))
 
+def performance(account,now=None):
+    """Uncapped trading returns since connection; transfers never become profit."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now=time.time() if now is None else now
+    today=datetime.fromtimestamp(now,ZoneInfo('Europe/Berlin')).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()*1000
+    first=one('SELECT * FROM equity_samples WHERE account_id=? ORDER BY timestamp LIMIT 1',(account['id'],))
+    result={}
+    for key,cutoff in [('today',today),('30',(now-30*86400)*1000),('90',(now-90*86400)*1000),('365',(now-365*86400)*1000),('all',0)]:
+        reference=one('SELECT * FROM equity_samples WHERE account_id=? AND timestamp<=? ORDER BY timestamp DESC LIMIT 1',(account['id'],cutoff)) or first
+        if not reference or account['unrealized'] is None:
+            result[key]=None;continue
+        start=max(cutoff,reference['timestamp'])
+        realized=one('SELECT COALESCE(SUM(net),0) total FROM deals WHERE account_id=? AND is_close=1 AND timestamp>=?',(account['id'],start))['total']
+        net=realized+account['unrealized']-(reference['equity']-reference['balance'])
+        result[key]=dict(net=net,capital=reference['equity'],since=start,reference_at=reference['timestamp'])
+    return result
+
 def public_state():
     accounts=rows('SELECT * FROM accounts ORDER BY role DESC,name')
     from . import risk
     for a in accounts:
+        a['performance']=performance(a)
         a['risk']=risk.view(a) if a['role']=='follower' else None
         for key in ('token_id','symbol_json'):
             a.pop(key,None)

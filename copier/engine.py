@@ -9,6 +9,7 @@ import signal
 import time
 from decimal import Decimal, ROUND_FLOOR
 from . import store, oauth, safety, risk
+from . import pending as pending_orders
 from .transport import Connection, BrokerError, UncertainExecution, M, to_dict
 
 log=logging.getLogger('copier')
@@ -175,7 +176,7 @@ class Engine:
             store.execute('UPDATE mappings SET error=? WHERE id=?',(message,mid));store.audit('Synchronization failed: '+mid+' · '+message)
             log.error('Mapping %s: %s',mid,type(exc).__name__)
             m=store.one('SELECT * FROM mappings WHERE id=?',(mid,))
-            if m and m['follower_position']:safety.trip(message,m['follower_account'])
+            if m and (m['follower_position'] or m['follower_order']):safety.trip(message,m['follower_account'])
     async def command(self,mapping,kind,message):
         def entry_guard():
             safety.guard(mapping)
@@ -197,6 +198,22 @@ class Engine:
             raise
         except BrokerError as exc:
             store.execute("UPDATE commands SET status='rejected',error=?,completed=? WHERE id=?",(str(exc),time.time(),command_id))
+            if kind in ('cancel','pending_amend') and str(exc) in ('ORDER_NOT_FOUND','POSITION_NOT_FOUND'):
+                await self.reconcile(store.account(mapping['follower_account']))
+                actual=store.one('SELECT * FROM mappings WHERE id=?',(mapping['id'],))
+                if actual['status']=='closed' or actual['follower_position']:
+                    store.execute("UPDATE commands SET status='reconciled',error=NULL WHERE id=?",(command_id,))
+                    self.dirty.add(mapping['id'])
+                    return None
+            # A broker-side SL/TP can close the position between our snapshot
+            # and a close/amend request. Prove absence before treating it as done.
+            if kind in ('close','amend') and str(exc)=='POSITION_NOT_FOUND':
+                follower=store.account(mapping['follower_account'])
+                snapshot=await self.reconcile(follower)
+                if not any(p.positionId==mapping['follower_position'] for p in snapshot.position):
+                    store.execute("UPDATE commands SET status='reconciled',error=NULL WHERE id=?",(command_id,))
+                    store.audit('Copy already closed by broker: '+follower['name'])
+                    return None
             raise
         except (Exception,asyncio.CancelledError):
             store.execute("UPDATE commands SET status='uncertain',error='Broker confirmation pending',completed=? WHERE id=?",(time.time(),command_id))
@@ -215,7 +232,9 @@ class Engine:
         if not source:return
         if master['id'] not in self.ready and not source['closed']:return
         if mapping['status']=='uncertain' and not source['closed']:return
+        if mapping['master_order'] and not mapping['follower_position'] and store.one("SELECT 1 FROM commands WHERE mapping_id=? AND status IN ('sending','uncertain')",(mid,)):return
         if source['closed'] and store.one("SELECT 1 FROM commands WHERE mapping_id=? AND kind='close' AND status IN ('sending','uncertain')",(mid,)):return
+        if await pending_orders.sync(self,mapping,source,follower):return
         if not mapping['follower_position']:
             # Never open a previously paused or already-closed signal after a restart.
             if source['closed'] or store.setting('paused')!='false' or not follower['enabled']:
@@ -250,6 +269,7 @@ class Engine:
         if delta>0 and (target==0 or delta>=minimum):
             store.execute('UPDATE mappings SET close_target=? WHERE id=?',(target,mid))
             response=await self.command(mapping,'close',M.ProtoOAClosePositionReq(ctidTraderAccountId=follower['broker_id'],positionId=mapping['follower_position'],volume=delta))
+            if response is None:return
             if response.HasField('position'):self.save_position(follower,response.position)
             else:
                 # Never assume a close filled if the response lacks its resulting position.
@@ -268,6 +288,7 @@ class Engine:
             if desired['sl'] is not None:request.stopLoss=desired['sl']
             if desired['tp'] is not None:request.takeProfit=desired['tp']
             response=await self.command(mapping,'amend',request)
+            if response is None:return
             if response.HasField('position'):
                 self.save_position(follower,response.position)
                 confirmed=store.one('SELECT sl,tp FROM positions WHERE account_id=? AND position_id=?',(follower['id'],mapping['follower_position']))
@@ -307,7 +328,9 @@ class Engine:
         closing=deal.HasField('closePositionDetail');detail=deal.closePositionDetail
         digits=deal.moneyDigits if deal.HasField('moneyDigits') else 2
         dd=detail.moneyDigits if detail.HasField('moneyDigits') else digits
-        net=(detail.grossProfit+detail.swap+detail.commission-detail.pnlConversionFee)/(10**dd) if closing else None
+        # Brokers report conversion charges with either sign. They are a cost,
+        # never a rebate added to trading profit.
+        net=(detail.grossProfit+detail.swap+detail.commission-abs(detail.pnlConversionFee))/(10**dd) if closing else None
         store.execute('INSERT OR REPLACE INTO deals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(account['id'],deal.dealId,deal.positionId,deal.orderId,deal.symbolId,deal.executionTimestamp,deal.tradeSide,deal.filledVolume,deal.executionPrice,net,deal.commission/(10**digits),detail.swap/(10**dd) if closing else 0,int(closing),account['currency']))
     async def consume(self):
         while not self.stop.is_set():
@@ -321,6 +344,12 @@ class Engine:
                 if account['id'] in self.reconciling:
                     self.buffered.setdefault(account['id'],[]).append((environment,message));continue
                 if isinstance(message,M.ProtoOAExecutionEvent):
+                    if message.HasField('order'):
+                        pos=message.position if message.HasField('position') else None
+                        if account['role']=='master':
+                            fresh=account['id'] in self.ready and message.executionType==2 and (message.order.utcLastUpdateTimestamp or message.order.tradeData.openTimestamp)>=self.started.get(account['id'],0)
+                            pending_orders.master_event(self,account,message.order,pos,allow_new=fresh)
+                        else:pending_orders.follower_event(self,account,message.order,pos)
                     if message.HasField('deal'):
                         self.save_deal(account,message.deal)
                         if message.deal.HasField('closePositionDetail'):self.request_reconcile(account)
@@ -357,7 +386,7 @@ class Engine:
     async def reconcile(self,account,connection=None):
         lock=self.reconcile_locks.setdefault(account['id'],asyncio.Lock())
         async with lock:
-            if store.account(account['id']):await self._reconcile(account,connection)
+            if store.account(account['id']):return await self._reconcile(account,connection)
     async def _reconcile(self,account,connection=None):
         aid=account['id'];connection=connection or self.conn(account)
         self.reconciling.add(aid)
@@ -367,6 +396,7 @@ class Engine:
             margin=sum(p.usedMargin/(10**(p.moneyDigits if p.HasField('moneyDigits') else 2)) for p in response.position)
             store.execute('UPDATE accounts SET margin=? WHERE id=?',(margin,aid))
             store.set_status('reconciled:'+aid,time.time())
+            await pending_orders.reconcile(self,account,response,connection)
             for p in response.position:
                 self.detect_override(account,p)
                 self.save_position(account,p)
@@ -381,7 +411,7 @@ class Engine:
                 if p['position_id'] not in live_ids:
                     store.execute("UPDATE positions SET status='closed',volume=0 WHERE account_id=? AND position_id=?",(aid,p['position_id']))
             if account['role']=='master':
-                for source in store.rows('SELECT * FROM master_positions WHERE account_id=? AND closed=0',(aid,)):
+                for source in store.rows('SELECT * FROM master_positions WHERE account_id=? AND closed=0 AND position_id>0',(aid,)):
                     if source['position_id'] not in live_ids:
                         store.execute('UPDATE master_positions SET closed=1,volume=0 WHERE account_id=? AND position_id=?',(aid,source['position_id']))
                         for mapping in store.rows('SELECT id FROM mappings WHERE master_account=? AND master_position=?',(aid,source['position_id'])):self.schedule(mapping['id'])
@@ -415,7 +445,7 @@ class Engine:
         for p in pnls.positionUnrealizedPnL:store.execute('UPDATE positions SET pnl=? WHERE account_id=? AND position_id=?',(p.netUnrealizedPnL/(10**pd),aid,p.positionId))
         store.execute("UPDATE accounts SET balance=?,equity=?,unrealized=?,updated=?,status='connected',error=NULL WHERE id=?",(balance,equity,unrealized,time.time(),aid))
         risk.record_day(aid,balance)
-        store.execute('INSERT OR REPLACE INTO equity_samples VALUES(?,?,?,?)',(aid,int(time.time()//60)*60000,equity,balance))
+        store.execute('INSERT OR IGNORE INTO equity_samples VALUES(?,?,?,?)',(aid,int(time.time()//60)*60000,equity,balance))
     async def history(self,account):
         aid=account['id'];now=int(time.time()*1000)
         if time.time()-self.history_time.get(aid,0)<60:return
