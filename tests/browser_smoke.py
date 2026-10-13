@@ -33,8 +33,8 @@ with tempfile.TemporaryDirectory() as directory:
             # Test-only account; no cTrader connection, no seeded production data.
             sys.path.insert(0,str(Path(__file__).parent))
             from test_engine import add_account
-            add_account('test-follower','follower',999)
-            server.store.execute("UPDATE accounts SET balance=10000,equity=9560,currency='EUR',updated=? WHERE id='test-follower'",(__import__('time').time(),))
+            add_account('test-slave','slave',999)
+            server.store.execute("UPDATE accounts SET balance=10000,equity=9560,currency='EUR',updated=? WHERE id='test-slave'",(__import__('time').time(),))
             page.get_by_role('button',name='Refresh',exact=True).click()
             page.get_by_role('button',name='Loss limits',exact=True).first.click()
             dialog=page.get_by_role('dialog')
@@ -66,16 +66,16 @@ with tempfile.TemporaryDirectory() as directory:
             page.get_by_role('heading',name='Every account. One workspace.').wait_for()
             assert page.get_by_text('SLAVE',exact=True).count()==1
             server.store.set_status('heartbeat',__import__('time').time())
-            server.store.execute("INSERT INTO discovered VALUES('test-follower',999,'live','grant','999','Pepperstone')")
+            server.store.execute("INSERT INTO discovered VALUES('test-slave',999,'live','grant','999','Pepperstone')")
             page.get_by_role('button',name='Remove',exact=True).click()
             page.get_by_role('dialog').get_by_role('button',name='Remove account',exact=True).click()
             page.get_by_role('dialog').wait_for(state='detached')
             from copier.engine import Engine
             from test_engine import FakeConnection
-            engine=Engine();engine.connections={'live':FakeConnection()};engine.ready={'test-follower'}
+            engine=Engine();engine.connections={'live':FakeConnection()};engine.ready={'test-slave'}
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=1) as pool:pool.submit(lambda:__import__('asyncio').run(engine.remove_accounts())).result()
-            assert server.store.account('test-follower') is None
+            assert server.store.account('test-slave') is None
             page.get_by_role('button',name='Refresh',exact=True).click()
             page.get_by_text('Your accounts start here.',exact=True).wait_for()
             page.get_by_role('button',name='Add account',exact=True).click()
@@ -86,8 +86,8 @@ with tempfile.TemporaryDirectory() as directory:
             dialog.get_by_role('button',name='Connect account',exact=True).click()
             dialog.wait_for(state='detached')
             page.get_by_text('Re-added slave',exact=True).first.wait_for()
-            assert server.store.account('test-follower')['role']=='follower'
-            assert not __import__('re').search(r'Follower|Schutzstopp|Verlustgrenzen|Schließen|Konto zuordnen',page.locator('body').inner_text())
+            assert server.store.account('test-slave')['role']=='slave'
+            assert not __import__('re').search(r'Slave|Schutzstopp|Verlustgrenzen|Schließen|Konto zuordnen',page.locator('body').inner_text())
             page.get_by_role('button',name='Sign out',exact=True).last.click();page.get_by_role('heading',name='Welcome back.').wait_for()
             assert not errors,errors
             print(json.dumps({'browser':os.environ.get('TEST_BROWSER','chromium'),'routes':7,'mobileWidth':390,'javascriptErrors':errors,'screenshots':str(artifacts)}))

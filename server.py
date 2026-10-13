@@ -32,7 +32,7 @@ def validate_account(body,c):
     if not discovered:raise ValueError('Authorize cTrader first, then select a discovered account.')
     name=str(body.get('name','')).strip();provider=body.get('provider');kind=body.get('kind');role=body.get('role')
     if not name or len(name)>60:raise ValueError('Account name must contain 1 to 60 characters.')
-    if provider not in ('FTMO','Pepperstone') or kind not in ('real','simulated') or role not in ('overlord','master','follower'):raise ValueError('Invalid account settings.')
+    if provider not in ('FTMO','Pepperstone') or kind not in ('real','simulated') or role not in ('overlord','master','slave'):raise ValueError('Invalid account settings.')
     if provider=='FTMO' and kind!='simulated':raise ValueError('FTMO capital is classified as simulated capital.')
     if role=='overlord' and c.execute("SELECT 1 FROM accounts WHERE role='overlord'").fetchone():raise ValueError('An Overlord source is already configured.')
     if role=='master' and c.execute("SELECT 1 FROM accounts WHERE role='master'").fetchone():raise ValueError('A master is already configured.')
@@ -123,7 +123,7 @@ class Handler(SimpleHTTPRequestHandler):
                         if not any(a['role']=='master' and a['status']=='connected' for a in state['accounts']):raise ValueError('A synchronized master is required.')
                         if any(a['role']=='overlord' for a in state['accounts']) and not any(a['role']=='master' and a['enabled'] and a['status']=='connected' for a in state['accounts']):raise ValueError('Enable and synchronize the master relay before starting the copy chain.')
                         if any(a['role']=='overlord' for a in state['accounts']) and not any(a['role']=='overlord' and a['status']=='connected' for a in state['accounts']):raise ValueError('The Overlord source must be synchronized before starting the copy chain.')
-                        if not any(a['role']=='follower' and a['enabled'] and a['status']=='connected' for a in state['accounts']):raise ValueError('At least one enabled, synchronized slave is required.')
+                        if not any(a['role']=='slave' and a['enabled'] and a['status']=='connected' for a in state['accounts']):raise ValueError('At least one enabled, synchronized slave is required.')
                     c.execute("UPDATE settings SET value=? WHERE key='paused'",('true' if paused else 'false',))
                     event='New copies '+('paused; existing positions remain managed.' if paused else 'enabled.')
                 elif path=='/api/safety/reset':
@@ -152,7 +152,7 @@ class Handler(SimpleHTTPRequestHandler):
                     event='cTrader account added: '+name+' · '+role
                 elif path=='/api/rules':
                     account=c.execute('SELECT * FROM accounts WHERE id=?',(body.get('id'),)).fetchone()
-                    if not account or account['role'] not in ('master','follower'):raise ValueError('Copy target account not found.')
+                    if not account or account['role'] not in ('master','slave'):raise ValueError('Copy target account not found.')
                     if account['role']=='master' and not c.execute("SELECT 1 FROM accounts WHERE role='overlord'").fetchone():raise ValueError('A master copy rule is only available when an Overlord source is configured.')
                     lots=float(body.get('lots'));enabled=body.get('enabled')
                     if not isinstance(enabled,bool) or not math.isfinite(lots) or not .01<=lots<=100:raise ValueError('Invalid lots or activation setting.')
@@ -165,7 +165,7 @@ class Handler(SimpleHTTPRequestHandler):
                     event='Copy rule saved: '+account['name']+' · '+str(lots)+' Lots · '+('enabled' if enabled else 'paused')
                 elif path=='/api/risk':
                     from copier.risk import day_key
-                    account=c.execute("SELECT * FROM accounts WHERE id=? AND role='follower'",(body.get('id'),)).fetchone()
+                    account=c.execute("SELECT * FROM accounts WHERE id=? AND role='slave'",(body.get('id'),)).fetchone()
                     if not account:raise ValueError('Slave not found.')
                     def amount(key,optional=False):
                         value=body.get(key)
@@ -202,7 +202,7 @@ class Handler(SimpleHTTPRequestHandler):
                     name=str(body.get('name',account['name'])).strip();symbol=str(body.get('symbol',account['symbol_name'])).strip()
                     if not name or len(name)>60 or not symbol or len(symbol)>40:raise ValueError('Invalid account name or symbol name.')
                     if symbol!=account['symbol_name']:
-                        if c.execute("SELECT 1 FROM mappings WHERE (master_account=? OR follower_account=?) AND status NOT IN ('closed','failed')",(account['id'],account['id'])).fetchone():raise ValueError('The symbol cannot be changed while active position mappings exist.')
+                        if c.execute("SELECT 1 FROM mappings WHERE (master_account=? OR slave_account=?) AND status NOT IN ('closed','failed')",(account['id'],account['id'])).fetchone():raise ValueError('The symbol cannot be changed while active position mappings exist.')
                         c.execute("UPDATE accounts SET name=?,symbol_name=?,status='pending',enabled=0 WHERE id=?",(name,symbol,account['id']))
                     else:c.execute('UPDATE accounts SET name=? WHERE id=?',(name,account['id']))
                     event='Account settings updated: '+name

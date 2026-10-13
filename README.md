@@ -1,26 +1,26 @@
 # GIMM · Trade Copier
 
-A self-hosted XAU/USD trade copier built with Python, the cTrader Open API, and a web dashboard. It can copy confirmed position openings directly from one master to as many follower accounts as the broker and server can support, or relay them through an Overlord → master → followers chain. It then synchronizes stop-loss, take-profit, partial closes, and full closes.
+A self-hosted XAU/USD trade copier built with Python, the cTrader Open API, and a web dashboard. It can copy confirmed position openings directly from one overlord to one master and from there to many slave accounts as the broker and my self-hosted kubernetes infrastructure can support, or relay them through an Overlord --> master --> slaves chain. It then synchronizes stop-loss, take-profit, partial closes, and full closes so everything moves as one.
 
 The project connects a practical trading use case with asynchronous communication, persistent state, authentication, and error handling. A central engineering question is how to keep positions synchronized and traceable when connections fail or broker confirmations do not arrive.
 
-The application sends real trading commands. Without authorized accounts, data views remain empty; no sample trades or invented returns are displayed. Initial execution checks should use broker demo accounts.
+The application sends real trading commands. Without authorized accounts, data views remain empty; no sample trades or invented returns are displayed.
 
 ## Purpose and features
 
 Managing several accounts manually requires repeating entries and subsequent changes. The copier handles that transfer and displays the state of each copy. Each destination has its own configurable fixed lot size. Trading decisions originate on the master account, or on the Overlord source when a relay chain is configured; the copier does not implement an entry strategy.
 
-Supported scope: one optional Overlord source, one relay master, multiple followers, and XAU/USD on hedging accounts. There is no application-level follower-count cap; practical scale depends on cTrader request limits, account authorization, and server capacity. Account configuration includes Pepperstone and FTMO. FTMO capital is classified as simulated. The English interface calls followers **Slave**, while the internal API and database retain `follower`.
+Supported scope: one optional Overlord source, one relay master, multiple slaves, and XAU/USD on hedging accounts. There is no application-level slave-count cap; practical scale depends on cTrader request limits, account authorization, and server capacity.
 
 - cTrader OAuth and account discovery across multiple cTrader IDs.
-- Optional two-stage relay: Overlord source → one enabled master account → any number of configured followers. Each hop uses a confirmed broker account and its own lot setting.
+- Optional two-stage relay: Overlord source → one enabled master account → any number of configured slaves. Each hop uses a confirmed broker account and its own lot setting.
 - Confirmed market entries plus mirrored limit, stop and stop-limit orders, with their protection, amendments and cancellations.
 - SL/TP synchronization, proportional partial closes, and full closes.
-- Detection of manual follower changes and restoration of master SL/TP management.
+- Detection of manual slave changes and restoration of master SL/TP management.
 - Combined portfolio equity and trading return (amount and percentage) since connection, with Berlin-day and period filters; position mappings, connection diagnostics, and activity log.
 - Trade journal, equity recording, analytics, and CSV export based on broker data.
 - Configurable technical protection rules and an emergency stop.
-- Per-follower loss displays that do not trigger trading commands.
+- Per-slave loss displays that do not trigger trading commands.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ flowchart TD
 
 **The web server and copy engine run as separate processes.** The web server serves the interface and JSON API, checks sessions, and stores settings and user actions. Only the engine executes trading commands. Closing the browser therefore does not stop synchronization.
 
-The engine processes broker events through an `asyncio.Queue`. Concurrent tasks handle account initialization, position reconciliation, history imports, heartbeats, and protection monitoring. Commands for the same copy run in order; different followers can be processed concurrently. A local file lock prevents a second engine process from using the same database file.
+The engine processes broker events through an `asyncio.Queue`. Concurrent tasks handle account initialization, position reconciliation, history imports, heartbeats, and protection monitoring. Commands for the same copy run in order; different slaves can be processed concurrently. A local file lock prevents a second engine process from using the same database file.
 
 Both processes exchange state through SQLite, without an additional message broker. SQLite uses WAL and short-lived database connections. This keeps a private single-instance deployment manageable; distributed operation with multiple active engines is not supported.
 
@@ -58,7 +58,7 @@ Both processes exchange state through SQLite, without an additional message brok
 ### Lifecycle of a copy
 
 1. The engine authenticates accounts and loads positions, symbol metadata, and broker volume rules. Master positions already open at startup are not copied retroactively.
-2. With copying enabled, a newly confirmed Overlord position creates a persistent mapping to the enabled relay master. The confirmed relay account then becomes the source for its enabled followers. Without an Overlord, the configured master copies directly to followers. A unique constraint prevents duplicate mappings of the same source position to the same target account.
+2. With copying enabled, a newly confirmed Overlord position creates a persistent mapping to the enabled relay master. The confirmed relay account then becomes the source for its enabled slaves. Without an Overlord, the configured master copies directly to slaves. A unique constraint prevents duplicate mappings of the same source position to the same target account.
 3. The configured fixed lot size is converted to a valid broker volume. Before sending, the engine checks pause state, safety latches, signal age, and limits.
 4. The trading intent is recorded in `commands` and sent through the appropriate live or demo connection. Execution requires a matching broker confirmation.
 5. Each confirmed destination position is linked to its mapping. Subsequent upstream changes determine protection prices and target remaining volume. Manual SL/TP overrides are tracked separately for each field.
@@ -72,7 +72,7 @@ Both processes exchange state through SQLite, without an additional message brok
 |---|---|
 | `accounts`, `discovered`, `oauth_tokens` | Account configuration, authorized broker accounts, and encrypted tokens |
 | `positions`, `master_positions` | Last known broker state and master reference state |
-| `mappings`, `commands` | Master-to-follower mappings and trading intents |
+| `mappings`, `commands` | Master-to-slave mappings and trading intents |
 | `deals`, `equity_samples` | Imported executions and equity recorded after connection |
 | `settings`, `engine_status`, `audit` | Configuration, process status, and activity records |
 | `safety_timers`, `liquidations`, `safety_actions` | Protection deadlines and emergency actions that survive restarts |
@@ -90,76 +90,10 @@ Access is designed for a private administrator. Passwords use PBKDF2-SHA256 with
 ## Behavior and limitations
 
 - **Pause:** Stops new copies. Existing mappings still receive protection and closing changes. `ENGINE_TRADING_ENABLED=false` disables every trading command, including emergency closes.
-- **Execution:** New limit, stop and stop-limit entry orders are mirrored before execution, with fixed follower lots and SL/TP. Existing pending orders at startup are not copied retroactively. Each broker executes independently; prices and fill timing can differ. Fills reuse the pending mapping without a second market entry.
+- **Execution:** New limit, stop and stop-limit entry orders are mirrored before execution, with fixed slave lots and SL/TP. Existing pending orders at startup are not copied retroactively. Each broker executes independently; prices and fill timing can differ. Fills reuse the pending mapping without a second market entry.
 - **Reconnection:** Existing mappings are reconciled. Unmapped master positions created during an outage are not copied later.
-- **Emergency stop:** Closes every position and cancels pending orders on assigned followers, including manual trades and other instruments. With an Overlord chain it also closes the relay master; the Overlord source stays unchanged. An unavailable broker connection prevents immediate liquidation.
-- **Protection rules:** May close follower positions independently of the master, for example when a position lacks an SL for too long. Defaults and reset conditions are documented in the operating guide.
+- **Emergency stop:** Closes every position and cancels pending orders on assigned slaves, including manual trades and other instruments. With an Overlord chain it also closes the relay master; the Overlord source stays unchanged. An unavailable broker connection prevents immediate liquidation.
+- **Protection rules:** May close slave positions independently of the master, for example when a position lacks an SL for too long. Defaults and reset conditions are documented in the operating guide.
 - **Loss displays:** Show remaining headroom in account currency. They do not automatically block or close positions and do not implement complete prop-challenge rule monitoring.
 - **Analytics:** Maximum drawdown uses cumulative realized trading P&L. History imports start with the last 90 days; equity samples begin after connection. There is no automatic currency conversion. API output limits may restrict long-term analysis.
 - **Deployment:** One local engine instance, without distributed failover. Direct engine execution requires a Unix system such as Linux or macOS because it uses `fcntl`; Docker is an option on Windows.
-
-## Running locally
-
-Python 3.12 is the Docker image target. An approved cTrader Open API application and authorized accounts are also required.
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-.venv/bin/python -c "import secrets; print(secrets.token_urlsafe(32))"
-.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-Set the generated values as `SETUP_TOKEN` and `TOKEN_ENCRYPTION_KEY`, then provide `CTRADER_CLIENT_ID` and `CTRADER_CLIENT_SECRET`. Register `http://localhost:8080/ctrader/callback` as the local redirect URI in your cTrader application.
-
-In two terminals, load your trusted local `.env` and start one process in each:
-
-```sh
-set -a
-source .env
-set +a
-.venv/bin/python server.py
-```
-
-```sh
-set -a
-source .env
-set +a
-.venv/bin/python -m copier.engine
-```
-
-Open `http://localhost:8080`, create the workspace, authorize cTrader, and assign accounts. New copies start paused and must be enabled in the dashboard.
-
-The [operating guide](docs/OPERATIONS.md) covers OAuth edge cases, protection rules, exact copying behavior, demo checks, account removal, backups, and Docker deployment. `compose.server.yaml` contains an installation-specific domain and an existing external proxy network; use `compose.yaml` for an independent setup.
-
-## Tests
-
-```sh
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -B -m unittest discover -s tests -v
-npm ci --ignore-scripts
-npm run test:ui
-```
-
-Python tests cover duplicate events, partial and full closes, manual overrides, safety stops, uncertain execution, and mapping recovery using isolated databases and simulated broker responses. The jsdom test checks setup, navigation, settings, and CSV export.
-
-An additional browser test uses Playwright:
-
-```sh
-.venv/bin/python -m playwright install chromium
-.venv/bin/python tests/browser_smoke.py
-```
-
-Automated tests do not replace execution checks with your own broker demo accounts. They cannot fully establish behavior under slippage, broker rejections, or outages.
-
-## Repository and presentation
-
-`.env`, `data/`, local environments, and test artifacts are git-ignored. Credentials, databases, and screenshots containing account details should stay outside a public repository. Spotware protocol files have their [own license](copier/protocol/LICENSE); the generated classes are not an independently designed protocol implementation.
-
-A draft project introduction is available in [docs/LINKEDIN.md](docs/LINKEDIN.md).
-
-### iPhone app
-
-An Xcode project for the iPhone is in [`ios/CopierEngine/`](ios/CopierEngine/). It opens the private dashboard inside a native iOS app shell and uses the existing HTTPS service at `copier-engine.gimmholding.com`; the copier engine and broker connections continue to run on the server. The app keeps its HttpOnly login cookie in iOS's persistent web data store. Sessions renew while the app is used and expire after one year of inactivity.
-
-To install it from a Mac with Xcode, open `ios/CopierEngine/CopierEngine.xcodeproj`, select the `CopierEngine` target, choose your Apple development team under Signing & Capabilities, connect your iPhone, and press Run. The first launch requires an internet connection and the server must be reachable over HTTPS. The iOS app icon is included in the project assets.

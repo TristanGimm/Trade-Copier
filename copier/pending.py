@@ -35,23 +35,23 @@ def master_event(engine,account,order,position=None,allow_new=False):
     fresh=allow_new and not old and store.setting('paused')=='false' and engine.trading_enabled() and time.time()*1000-stamp<=safety.policy()['max_signal_age']*1000
     if fresh:
         from .engine import lots_to_volume
-        for follower in store.copy_targets(account['role']):
-            if follower['id'] not in engine.ready:continue
-            volume=lots_to_volume(follower['lots'],json.loads(follower['symbol_json']))
+        for slave in store.copy_targets(account['role']):
+            if slave['id'] not in engine.ready:continue
+            volume=lots_to_volume(slave['lots'],json.loads(slave['symbol_json']))
             mid=secrets.token_hex(12)
-            store.execute('''INSERT OR IGNORE INTO mappings(id,master_account,master_position,master_order,follower_account,initial_master,initial_follower,label,status,created)
-                VALUES(?,?,?,?,?,?,?,?,?,?)''',(mid,aid,-oid,oid,follower['id'],order.tradeData.volume,volume,'gimm:'+mid,'pending',time.time()))
+            store.execute('''INSERT OR IGNORE INTO mappings(id,master_account,master_position,master_order,slave_account,initial_master,initial_slave,label,status,created)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',(mid,aid,-oid,oid,slave['id'],order.tradeData.volume,volume,'gimm:'+mid,'pending',time.time()))
     for m in store.rows("SELECT id FROM mappings WHERE master_account=? AND master_order=? AND status NOT IN ('closed','failed')",(aid,oid)):engine.schedule(m['id'])
 
-def follower_event(engine,account,order,position=None):
+def slave_event(engine,account,order,position=None):
     if order.orderType not in (2,3,6) or order.closingOrder:return
-    m=store.one('SELECT * FROM mappings WHERE follower_account=? AND label=? AND master_order IS NOT NULL',(account['id'],order.tradeData.label))
+    m=store.one('SELECT * FROM mappings WHERE slave_account=? AND label=? AND master_order IS NOT NULL',(account['id'],order.tradeData.label))
     if not m:return
-    store.execute('UPDATE mappings SET follower_order=? WHERE id=?',(order.orderId,m['id']))
+    store.execute('UPDATE mappings SET slave_order=? WHERE id=?',(order.orderId,m['id']))
     if position is not None and position.positionStatus in (1,2):
         engine.save_position(account,position)
-        store.execute("UPDATE mappings SET follower_position=?,status='active',error=NULL WHERE id=?",(position.positionId,m['id']))
-    elif order.orderStatus in (3,4,5) and not order.executedVolume and not m['follower_position']:
+        store.execute("UPDATE mappings SET slave_position=?,status='active',error=NULL WHERE id=?",(position.positionId,m['id']))
+    elif order.orderStatus in (3,4,5) and not order.executedVolume and not m['slave_position']:
         store.execute("UPDATE mappings SET status='closed',error=NULL WHERE id=?",(m['id'],))
     elif order.orderStatus==1 and (m['status']=='opening' or store.one("SELECT 1 FROM commands WHERE mapping_id=? AND kind='open' AND status IN ('sending','uncertain')",(m['id'],))):
         store.execute("UPDATE mappings SET status='active',error=NULL WHERE id=? AND status IN ('opening','uncertain')",(m['id'],))
@@ -66,37 +66,37 @@ def follower_event(engine,account,order,position=None):
             store.execute("UPDATE mappings SET status='active',error=NULL WHERE id=?",(m['id'],))
     engine.schedule(m['id'])
 
-async def sync(engine,mapping,source,follower):
+async def sync(engine,mapping,source,slave):
     """Return True while this copy is an unfilled pending order."""
     if not mapping['master_order']:return False
     mid=mapping['id'];saved=store.one('SELECT * FROM master_orders WHERE account_id=? AND order_id=?',(mapping['master_account'],mapping['master_order']))
     if not saved:return True
     order=Model.ProtoOAOrder.FromString(saved['payload'])
-    if mapping['follower_position']:
+    if mapping['slave_position']:
         # A partial fill can leave a live remainder. Cancel that before closing
         # the filled position, or when the master cancels its own remainder.
-        if mapping['follower_order'] and (source['closed'] or order.orderStatus in (3,4,5)):
+        if mapping['slave_order'] and (source['closed'] or order.orderStatus in (3,4,5)):
             if store.one("SELECT 1 FROM commands WHERE mapping_id=? AND kind='cancel' AND status IN ('sending','uncertain')",(mid,)):return False
-            details=await engine.conn(follower).request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=follower['broker_id'],orderId=mapping['follower_order']))
+            details=await engine.conn(slave).request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=slave['broker_id'],orderId=mapping['slave_order']))
             if details.order.orderStatus==1:
-                response=await engine.command(mapping,'cancel',M.ProtoOACancelOrderReq(ctidTraderAccountId=follower['broker_id'],orderId=mapping['follower_order']))
-                if response and response.HasField('order'):follower_event(engine,follower,response.order,response.position if response.HasField('position') else None)
+                response=await engine.command(mapping,'cancel',M.ProtoOACancelOrderReq(ctidTraderAccountId=slave['broker_id'],orderId=mapping['slave_order']))
+                if response and response.HasField('order'):slave_event(engine,slave,response.order,response.position if response.HasField('position') else None)
         return False
-    if mapping['follower_order']:
+    if mapping['slave_order']:
         if source['closed']:
             if store.one("SELECT 1 FROM commands WHERE mapping_id=? AND kind='cancel' AND status IN ('sending','uncertain')",(mid,)):return True
-            response=await engine.command(mapping,'cancel',M.ProtoOACancelOrderReq(ctidTraderAccountId=follower['broker_id'],orderId=mapping['follower_order']))
-            if response and response.HasField('order'):follower_event(engine,follower,response.order,response.position if response.HasField('position') else None)
+            response=await engine.command(mapping,'cancel',M.ProtoOACancelOrderReq(ctidTraderAccountId=slave['broker_id'],orderId=mapping['slave_order']))
+            if response and response.HasField('order'):slave_event(engine,slave,response.order,response.position if response.HasField('position') else None)
             return True
         # Details establish current broker fields, including fills racing an amendment.
-        details=await engine.conn(follower).request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=follower['broker_id'],orderId=mapping['follower_order']))
+        details=await engine.conn(slave).request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=slave['broker_id'],orderId=mapping['slave_order']))
         actual=details.order
         if actual.orderStatus!=1:
-            await engine.reconcile(follower)
+            await engine.reconcile(slave)
             if actual.orderStatus in (3,4,5) and not actual.executedVolume:
                 store.execute("UPDATE mappings SET status='closed',error=NULL WHERE id=?",(mid,))
             return True
-        request=M.ProtoOAAmendOrderReq(ctidTraderAccountId=follower['broker_id'],orderId=mapping['follower_order'],trailingStopLoss=False)
+        request=M.ProtoOAAmendOrderReq(ctidTraderAccountId=slave['broker_id'],orderId=mapping['slave_order'],trailingStopLoss=False)
         changed=False
         for field in FIELDS:
             if order.HasField(field):
@@ -108,7 +108,7 @@ async def sync(engine,mapping,source,follower):
             response=await engine.command(mapping,'pending_amend',request)
             if response is None:return True
             if response.HasField('position') and response.HasField('order'):
-                follower_event(engine,follower,response.order,response.position)
+                slave_event(engine,slave,response.order,response.position)
                 return True
             if response.HasField('order'):
                 for field in ('stopLoss','takeProfit','relativeStopLoss','relativeTakeProfit'):
@@ -117,9 +117,9 @@ async def sync(engine,mapping,source,follower):
             else:
                 store.execute("UPDATE mappings SET status='uncertain',error='Pending amendment confirmation missing' WHERE id=?",(mid,))
         return True
-    if source['closed'] or mapping['master_position']>0 or store.setting('paused')!='false' or not follower['enabled']:
+    if source['closed'] or mapping['master_position']>0 or store.setting('paused')!='false' or not slave['enabled']:
         store.execute("UPDATE mappings SET status='closed',error='Pending entry no longer eligible' WHERE id=?",(mid,));return True
-    request=M.ProtoOANewOrderReq(ctidTraderAccountId=follower['broker_id'],symbolId=follower['symbol_id'],orderType=order.orderType,tradeSide=order.tradeData.tradeSide,volume=mapping['initial_follower'],label=mapping['label'],clientOrderId=mid,timeInForce=order.timeInForce if order.HasField('timeInForce') else 2,trailingStopLoss=False)
+    request=M.ProtoOANewOrderReq(ctidTraderAccountId=slave['broker_id'],symbolId=slave['symbol_id'],orderType=order.orderType,tradeSide=order.tradeData.tradeSide,volume=mapping['initial_slave'],label=mapping['label'],clientOrderId=mid,timeInForce=order.timeInForce if order.HasField('timeInForce') else 2,trailingStopLoss=False)
     for field in FIELDS:
         if order.HasField(field):setattr(request,field,getattr(order,field))
     store.execute("UPDATE mappings SET status='opening' WHERE id=?",(mid,))
@@ -128,12 +128,12 @@ async def sync(engine,mapping,source,follower):
         store.execute("UPDATE mappings SET status='failed',error=? WHERE id=?",(str(exc),mid));raise
     if not response.HasField('order'):
         store.execute("UPDATE mappings SET status='uncertain',error='Pending order confirmation missing' WHERE id=?",(mid,));return True
-    follower_event(engine,follower,response.order,response.position if response.HasField('position') else None)
+    slave_event(engine,slave,response.order,response.position if response.HasField('position') else None)
     if response.order.orderStatus==1 and not response.HasField('position'):
         for field in ('stopLoss','takeProfit','relativeStopLoss','relativeTakeProfit'):
             if request.HasField(field) and (not response.order.HasField(field) or getattr(request,field)!=getattr(response.order,field)):
                 raise BrokerError('Pending order protection not confirmed')
-    store.audit('Pending order copied: '+follower['name']+' · Master order #'+str(order.orderId))
+    store.audit('Pending order copied: '+slave['name']+' · Master order #'+str(order.orderId))
     return True
 
 async def reconcile(engine,account,snapshot,connection):
@@ -151,14 +151,14 @@ async def reconcile(engine,account,snapshot,connection):
                     ON CONFLICT(account_id,position_id) DO UPDATE SET closed=1,volume=0''',
                     (account['id'],pid,details.order.tradeData.volume,0,details.order.tradeData.tradeSide,None,None,details.order.executionPrice,details.order.utcLastUpdateTimestamp))
                 for m in store.rows('SELECT id FROM mappings WHERE master_account=? AND master_position=?',(account['id'],pid)):engine.schedule(m['id'])
-    if account['role'] in ('master','follower'):
-        for order in snapshot.order:follower_event(engine,account,order)
+    if account['role'] in ('master','slave'):
+        for order in snapshot.order:slave_event(engine,account,order)
         live={o.orderId for o in snapshot.order}
         positions={p.positionId:p for p in snapshot.position}
-        for m in store.rows("SELECT * FROM mappings WHERE follower_account=? AND master_order IS NOT NULL AND follower_order IS NOT NULL AND follower_position IS NULL AND status NOT IN ('closed','failed')",(account['id'],)):
-            if m['follower_order'] in live:continue
-            details=await connection.request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=account['broker_id'],orderId=m['follower_order']))
-            follower_event(engine,account,details.order,positions.get(details.order.positionId))
+        for m in store.rows("SELECT * FROM mappings WHERE slave_account=? AND master_order IS NOT NULL AND slave_order IS NOT NULL AND slave_position IS NULL AND status NOT IN ('closed','failed')",(account['id'],)):
+            if m['slave_order'] in live:continue
+            details=await connection.request(M.ProtoOAOrderDetailsReq(ctidTraderAccountId=account['broker_id'],orderId=m['slave_order']))
+            slave_event(engine,account,details.order,positions.get(details.order.positionId))
             if details.order.orderStatus==2 and details.order.positionId not in positions:
                 store.execute("UPDATE mappings SET status='closed',error=NULL WHERE id=?",(m['id'],))
             if details.order.orderStatus in (2,3,4,5):

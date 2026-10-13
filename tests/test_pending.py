@@ -44,7 +44,7 @@ class PendingTests(fixtures.EngineTests):
     def master_order(self,o):pending.master_event(self.engine,store.account('master'),o,allow_new=True)
     async def test_pending_entry_protection_amend_cancel(self):
         self.master_order(order());await self.settle()
-        self.assertEqual(self.mapping()['follower_order'],601)
+        self.assertEqual(self.mapping()['slave_order'],601)
         req=next(r for r in self.conn.requests if isinstance(r,M.ProtoOANewOrderReq))
         self.assertEqual((req.orderType,req.limitPrice,req.stopLoss,req.takeProfit,req.volume),(2,3000,2990,3040,2000))
         self.master_order(order(sl=2995,tp=3050,stamp=int(time.time()*1000)+1000));await self.settle()
@@ -61,18 +61,18 @@ class PendingTests(fixtures.EngineTests):
         f=fixtures.position(201,2000,sl=2990,tp=3040,label=self.mapping()['label'],stamp=o.utcLastUpdateTimestamp)
         self.orders[601].orderStatus=2;self.orders[601].positionId=201;self.orders[601].executedVolume=2000
         self.conn.positions[201]=f
-        pending.follower_event(self.engine,store.account('follower'),self.orders[601],f)
+        pending.slave_event(self.engine,store.account('slave'),self.orders[601],f)
         await self.settle()
         self.assertEqual(len(store.rows('SELECT * FROM mappings')),1)
-        self.assertEqual((self.mapping()['master_position'],self.mapping()['follower_position']),(101,201))
+        self.assertEqual((self.mapping()['master_position'],self.mapping()['slave_position']),(101,201))
         self.assertEqual(len([r for r in self.conn.requests if isinstance(r,M.ProtoOANewOrderReq)]),1)
         self.source(fixtures.position(volume=0,status=2,stamp=o.utcLastUpdateTimestamp+1000));await self.settle()
         self.assertEqual(self.mapping()['status'],'closed')
-    async def test_follower_fills_first_then_master_cancels(self):
+    async def test_slave_fills_first_then_master_cancels(self):
         self.master_order(order());await self.settle()
         f=fixtures.position(201,2000,sl=2990,tp=3040,label=self.mapping()['label'])
         self.conn.positions[201]=f;self.orders[601].orderStatus=2;self.orders[601].executedVolume=2000
-        pending.follower_event(self.engine,store.account('follower'),self.orders[601],f);await self.settle()
+        pending.slave_event(self.engine,store.account('slave'),self.orders[601],f);await self.settle()
         self.master_order(order(status=5,stamp=int(time.time()*1000)+2000));await self.settle()
         self.assertEqual(self.conn.positions[201].positionStatus,2)
         self.assertNotEqual(store.setting('safety_latched'),'true')
@@ -107,11 +107,11 @@ class PendingTests(fixtures.EngineTests):
         self.master_order(order(status=5,stamp=int(time.time()*1000)+1000));await self.settle()
         self.engine.schedule(self.mapping()['id']);await self.settle()
         self.assertEqual(len(sent),1);self.assertEqual(self.mapping()['status'],'uncertain')
-    async def test_follower_fill_found_after_restart_uses_existing_mapping(self):
+    async def test_slave_fill_found_after_restart_uses_existing_mapping(self):
         self.master_order(order());await self.settle()
         label=self.mapping()['label'];f=fixtures.position(201,2000,label=label,sl=2990,tp=3040)
         self.orders[601].orderStatus=2;self.orders[601].positionId=201;self.orders[601].executedVolume=2000
         self.conn.positions[201]=f
-        await self.engine.reconcile(store.account('follower'));await self.settle()
-        self.assertEqual(self.mapping()['follower_position'],201)
+        await self.engine.reconcile(store.account('slave'));await self.settle()
+        self.assertEqual(self.mapping()['slave_position'],201)
         self.assertEqual(len([r for r in self.conn.requests if isinstance(r,M.ProtoOANewOrderReq)]),1)

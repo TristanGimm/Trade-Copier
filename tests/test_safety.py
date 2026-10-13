@@ -12,7 +12,7 @@ class SafetyTests(fixtures.EngineTests):
     async def watchdog_tick(self,w):
         await w.tick()
         await asyncio.gather(*w.tasks.values())
-    async def test_panic_closes_follower_while_master_unavailable(self):
+    async def test_panic_closes_slave_while_master_unavailable(self):
         await self.open_trade();self.engine.ready.discard('master')
         safety.trip('manual');w=safety.Watchdog(self.engine)
         await self.watchdog_tick(w);await self.watchdog_tick(w)
@@ -80,7 +80,7 @@ class SafetyTests(fixtures.EngineTests):
         safety.trip('a');safety.trip('b');self.assertEqual(len(store.rows('SELECT * FROM liquidations')),1)
     async def test_restart_pending_safety_action_is_not_repeated(self):
         await self.open_trade();safety.trip('manual')
-        store.execute("INSERT INTO safety_actions VALUES('crashed','follower','close',201,'sending',NULL,?,NULL)",(time.time(),))
+        store.execute("INSERT INTO safety_actions VALUES('crashed','slave','close',201,'sending',NULL,?,NULL)",(time.time(),))
         before=len(self.conn.requests);await self.watchdog_tick(safety.Watchdog(self.engine))
         self.assertFalse(any(isinstance(r,M.ProtoOAClosePositionReq) for r in self.conn.requests[before:]))
 
@@ -124,9 +124,9 @@ class SafetyTests(fixtures.EngineTests):
         self.assertEqual(len(attempts),3)
         self.assertEqual(store.one('SELECT * FROM liquidations')['status'],'blocked')
 
-    async def test_emergency_closes_every_follower_including_disabled_and_manual_other_symbol(self):
+    async def test_emergency_closes_every_slave_including_disabled_and_manual_other_symbol(self):
         await self.open_trade()
-        fixtures.add_account('disabled','follower',3)
+        fixtures.add_account('disabled','slave',3)
         store.execute("UPDATE accounts SET enabled=0 WHERE id='disabled'")
         self.engine.ready.add('disabled')
         book={1:[position(900,10000)],2:[self.conn.positions[201],position(902,500,symbol=99)],3:[position(903,1500)]}

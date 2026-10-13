@@ -56,10 +56,10 @@ def init():
           sl REAL,tp REAL,price REAL,updated INTEGER,closed INTEGER DEFAULT 0,eligible INTEGER DEFAULT 0,
           PRIMARY KEY(account_id,position_id));
         CREATE TABLE IF NOT EXISTS mappings(
-          id TEXT PRIMARY KEY,master_account TEXT,master_position INTEGER,follower_account TEXT,
-          follower_position INTEGER,initial_master INTEGER,initial_follower INTEGER,label TEXT UNIQUE,
+          id TEXT PRIMARY KEY,master_account TEXT,master_position INTEGER,slave_account TEXT,
+          slave_position INTEGER,initial_master INTEGER,initial_slave INTEGER,label TEXT UNIQUE,
           status TEXT,sl REAL,tp REAL,close_target INTEGER,error TEXT,latency_ms REAL,created REAL,
-          UNIQUE(master_account,master_position,follower_account));
+          UNIQUE(master_account,master_position,slave_account));
         CREATE TABLE IF NOT EXISTS commands(
           id TEXT PRIMARY KEY,mapping_id TEXT,kind TEXT,payload TEXT,status TEXT,error TEXT,created REAL,completed REAL);
         CREATE TABLE IF NOT EXISTS deals(
@@ -78,9 +78,15 @@ def init():
         ''')
         c.execute('BEGIN IMMEDIATE')
         columns={r[1] for r in c.execute('PRAGMA table_info(mappings)')}
+        # Migrate existing installations without losing saved copy mappings.
+        for previous,current in (('follower_account','slave_account'),('follower_position','slave_position'),('initial_follower','initial_slave'),('follower_order','slave_order')):
+            if previous in columns and current not in columns:
+                c.execute('ALTER TABLE mappings RENAME COLUMN '+previous+' TO '+current)
+                columns.remove(previous);columns.add(current)
+        c.execute("UPDATE accounts SET role='slave' WHERE role='follower'")
         for name in ('protection_initialized','sl_override','tp_override'):
             if name not in columns:c.execute('ALTER TABLE mappings ADD COLUMN '+name+' INTEGER NOT NULL DEFAULT 0')
-        for name in ('master_order','follower_order'):
+        for name in ('master_order','slave_order'):
             if name not in columns:c.execute('ALTER TABLE mappings ADD COLUMN '+name+' INTEGER')
         c.execute('''CREATE TABLE IF NOT EXISTS master_orders(
             account_id TEXT,order_id INTEGER,payload BLOB,status INTEGER,updated INTEGER,
@@ -102,7 +108,7 @@ def execute(query, args=()):
 def copy_targets(role):
     """Return the enabled next hop for this source in the fixed two-tier topology."""
     if role=='overlord':return rows("SELECT * FROM accounts WHERE role='master' AND enabled=1")
-    if role=='master':return rows("SELECT * FROM accounts WHERE role='follower' AND enabled=1")
+    if role=='master':return rows("SELECT * FROM accounts WHERE role='slave' AND enabled=1")
     return []
 
 def audit(event):
@@ -141,7 +147,7 @@ def public_state():
     from . import risk
     for a in accounts:
         a['performance']=performance(a)
-        a['risk']=risk.view(a) if a['role']=='follower' else None
+        a['risk']=risk.view(a) if a['role']=='slave' else None
         for key in ('token_id','symbol_json'):
             a.pop(key,None)
     status={r['key']:json.loads(r['value']) for r in rows('SELECT * FROM engine_status')}
@@ -150,9 +156,9 @@ def public_state():
     has_overlord=any(a['role']=='overlord' for a in relevant)
     checks=[{'label':'Copy-Engine','ok':not status['stale']},
             {'label':'Protection monitor','ok':time.time()-status.get('safety_heartbeat',0)<5 and not status.get('safety_error')},
-            {'label':'Copy chain assigned','ok':any(a['role']=='master' for a in relevant) and any(a['role']=='follower' for a in relevant) and (not has_overlord or any(a['role']=='master' and a['enabled'] for a in relevant))},
+            {'label':'Copy chain assigned','ok':any(a['role']=='master' for a in relevant) and any(a['role']=='slave' for a in relevant) and (not has_overlord or any(a['role']=='master' and a['enabled'] for a in relevant))},
             {'label':'Trade execution','ok':bool(status.get('trading_enabled'))},
-            {'label':'Protection prices confirmed','ok':not one("SELECT 1 FROM mappings m JOIN master_positions s ON s.account_id=m.master_account AND s.position_id=m.master_position JOIN positions p ON p.account_id=m.follower_account AND p.position_id=m.follower_position WHERE m.status='active' AND p.status='open' AND ((m.sl_override=0 AND p.sl IS NOT s.sl) OR (m.tp_override=0 AND p.tp IS NOT s.tp))")},
+            {'label':'Protection prices confirmed','ok':not one("SELECT 1 FROM mappings m JOIN master_positions s ON s.account_id=m.master_account AND s.position_id=m.master_position JOIN positions p ON p.account_id=m.slave_account AND p.position_id=m.slave_position WHERE m.status='active' AND p.status='open' AND ((m.sl_override=0 AND p.sl IS NOT s.sl) OR (m.tp_override=0 AND p.tp IS NOT s.tp))")},
             {'label':'No safety stop','ok':setting('safety_latched')!='true'},
             {'label':'No unconfirmed commands','ok':not one("SELECT 1 FROM commands WHERE status IN ('sending','uncertain')")},
             {'label':'No synchronization errors','ok':not one("SELECT 1 FROM mappings WHERE status NOT IN ('closed','failed') AND error IS NOT NULL")}]

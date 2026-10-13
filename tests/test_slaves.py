@@ -5,7 +5,7 @@ import test_engine as fixtures
 from copier import store,risk,safety
 from copier.transport import M
 
-class FollowerTests(fixtures.EngineTests):
+class SlaveTests(fixtures.EngineTests):
     async def event(self,event):
         task=asyncio.create_task(self.engine.consume());self.engine.event('live',event)
         await self.engine.events.join();task.cancel();await asyncio.gather(task,return_exceptions=True)
@@ -32,7 +32,7 @@ class FollowerTests(fixtures.EngineTests):
         self.assertEqual(self.conn.positions[201].positionStatus,2)
     async def test_missing_master_close_event_recovered_by_reconcile(self):
         self.source(fixtures.position());await self.settle()
-        # Broker master snapshot is empty; follower snapshot still contains its trade.
+        # Broker master snapshot is empty; slave snapshot still contains its trade.
         original=self.conn.request
         async def request(req,**kwargs):
             if isinstance(req,M.ProtoOAReconcileReq) and req.ctidTraderAccountId==1:return M.ProtoOAReconcileRes(ctidTraderAccountId=1)
@@ -62,23 +62,23 @@ class FollowerTests(fixtures.EngineTests):
         self.engine.schedule(self.mapping()['id']);await self.settle()
         self.assertEqual(p.stopLoss,2990)
     def test_loss_budgets_only_warn_and_include_floating_losses(self):
-        store.execute('INSERT INTO risk_limits VALUES(?,?,?,?,?)',('follower',10000,1000,500,20))
-        risk.record_day('follower',10200)
-        store.execute('UPDATE accounts SET equity=9760,updated=? WHERE id=?',(time.time(),'follower'))
-        view=risk.view(store.account('follower'))
+        store.execute('INSERT INTO risk_limits VALUES(?,?,?,?,?)',('slave',10000,1000,500,20))
+        risk.record_day('slave',10200)
+        store.execute('UPDATE accounts SET equity=9760,updated=? WHERE id=?',(time.time(),'slave'))
+        view=risk.view(store.account('slave'))
         self.assertEqual(view['total']['remaining'],760)
         self.assertEqual(view['daily']['remaining'],60)
         self.assertTrue(view['daily']['warning']);self.assertFalse(view['total']['warning'])
         self.assertEqual(store.setting('paused'),'false');self.assertFalse(store.rows('SELECT * FROM liquidations'))
     def test_daily_reference_is_stable_and_rolls_over_in_berlin(self):
-        risk.record_day('follower',10000,0);risk.record_day('follower',9000,0)
+        risk.record_day('slave',10000,0);risk.record_day('slave',9000,0)
         self.assertEqual(store.one('SELECT * FROM risk_days')['balance'],10000)
-        risk.record_day('follower',11000,86400)
+        risk.record_day('slave',11000,86400)
         self.assertEqual(len(store.rows('SELECT * FROM risk_days')),2)
     def test_loss_breach_does_not_pause_or_close(self):
-        store.execute('INSERT INTO risk_limits VALUES(?,?,?,?,?)',('follower',10000,1000,500,20))
-        risk.record_day('follower',10000);store.execute("UPDATE accounts SET equity=8900 WHERE id='follower'")
-        view=risk.view(store.account('follower'))
+        store.execute('INSERT INTO risk_limits VALUES(?,?,?,?,?)',('slave',10000,1000,500,20))
+        risk.record_day('slave',10000);store.execute("UPDATE accounts SET equity=8900 WHERE id='slave'")
+        view=risk.view(store.account('slave'))
         self.assertTrue(view['total']['breached']);self.assertEqual(view['total']['remaining'],-100)
         self.assertEqual(store.setting('paused'),'false');self.assertFalse(store.rows('SELECT * FROM liquidations'))
 
@@ -103,4 +103,4 @@ class FollowerTests(fixtures.EngineTests):
         self.assertEqual(store.one("SELECT status FROM commands WHERE id='old-amend'")['status'],'reconciled')
 
 for name in fixtures.EngineTests.__dict__:
-    if name.startswith('test_') and name not in FollowerTests.__dict__:setattr(FollowerTests,name,None)
+    if name.startswith('test_') and name not in SlaveTests.__dict__:setattr(SlaveTests,name,None)

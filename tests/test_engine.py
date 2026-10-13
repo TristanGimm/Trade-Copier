@@ -56,9 +56,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp=tempfile.TemporaryDirectory();self.previous=store.DB;store.DB=self.temp.name+'/copier.db';store.init()
         self.env=patch.dict(os.environ,{'ENGINE_TRADING_ENABLED':'true'});self.env.start()
-        add_account('master','master',1);add_account('follower','follower',2)
+        add_account('master','master',1);add_account('slave','slave',2)
         store.execute("UPDATE settings SET value='false' WHERE key='paused'")
-        self.engine=Engine();self.conn=FakeConnection();self.engine.connections={'live':self.conn};self.engine.ready={'master','follower'};self.engine.started={'master':int(time.time()*1000)-1000}
+        self.engine=Engine();self.conn=FakeConnection();self.engine.connections={'live':self.conn};self.engine.ready={'master','slave'};self.engine.started={'master':int(time.time()*1000)-1000}
     async def test_initialization_retry_reuses_authenticated_session(self):
         self.engine.grants={'grant':'access'}
         self.engine.authenticated={'master':'access'}
@@ -104,7 +104,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.source(position(stamp=int(time.time()*1000)+2000));await self.settle()
         amend=self.conn.requests[-1];self.assertIsInstance(amend,M.ProtoOAAmendPositionSLTPReq)
         self.assertFalse(amend.HasField('stopLoss'));self.assertFalse(amend.HasField('takeProfit'))
-    async def test_stop_moved_while_follower_open_in_flight(self):
+    async def test_stop_moved_while_slave_open_in_flight(self):
         async def hook():self.source(position(sl=2993,tp=3050,stamp=int(time.time()*1000)+5000))
         self.conn.open_hook=hook;self.source(position());await self.settle()
         p=store.one('SELECT * FROM positions');self.assertEqual((p['sl'],p['tp']),(2993,3050))
@@ -114,14 +114,14 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.conn.positions[201].tradeData.volume,1000)
         self.source(position(volume=0,status=2,stamp=int(time.time()*1000)+2000));await self.settle()
         self.assertEqual(self.mapping()['status'],'closed');self.assertEqual(self.conn.positions[201].tradeData.volume,0)
-    async def test_master_closes_while_follower_opens(self):
+    async def test_master_closes_while_slave_opens(self):
         async def hook():self.source(position(volume=0,status=2,stamp=int(time.time()*1000)+5000))
         self.conn.open_hook=hook;self.source(position());await self.settle()
         self.assertEqual(self.mapping()['status'],'closed')
         self.assertEqual([type(r) for r in self.conn.requests],[M.ProtoOANewOrderReq,M.ProtoOAClosePositionReq])
-    async def test_independent_follower_close_is_not_reopened(self):
+    async def test_independent_slave_close_is_not_reopened(self):
         self.source(position());await self.settle()
-        self.engine.save_position(store.account('follower'),position(201,0,status=2,stamp=int(time.time()*1000)+10000))
+        self.engine.save_position(store.account('slave'),position(201,0,status=2,stamp=int(time.time()*1000)+10000))
         self.source(position(sl=2990,stamp=int(time.time()*1000)+11000));await self.settle()
         self.assertEqual(len(self.conn.requests),1);self.assertEqual(self.mapping()['status'],'closed')
     async def test_paused_signal_is_not_copied_on_resume(self):
@@ -140,17 +140,17 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mapping()['status'],'uncertain')
         self.conn.failure=None;self.source(position(sl=2990));await self.settle();self.assertEqual(len(self.conn.requests),1)
         self.conn.positions[201]=position(201,2000,label=self.mapping()['label'])
-        await self.engine.reconcile(store.account('follower'));await self.settle()
-        self.assertEqual(self.mapping()['follower_position'],201)
+        await self.engine.reconcile(store.account('slave'));await self.settle()
+        self.assertEqual(self.mapping()['slave_position'],201)
         self.assertEqual(sum(isinstance(r,M.ProtoOANewOrderReq) for r in self.conn.requests),1)
         self.assertEqual(self.mapping()['status'],'active')
-    async def test_recovery_does_not_rescale_an_already_reduced_follower(self):
+    async def test_recovery_does_not_rescale_an_already_reduced_slave(self):
         self.conn.failure=UncertainExecution('timeout');self.source(position());await self.settle()
         self.conn.failure=None
         self.conn.positions[201]=position(201,1000,label=self.mapping()['label'])
         self.source(position(volume=5000,stamp=int(time.time()*1000)+1000));await self.settle()
-        await self.engine.reconcile(store.account('follower'));await self.settle()
-        self.assertEqual(self.mapping()['initial_follower'],2000)
+        await self.engine.reconcile(store.account('slave'));await self.settle()
+        self.assertEqual(self.mapping()['initial_slave'],2000)
         self.assertEqual(self.conn.positions[201].tradeData.volume,1000)
         self.assertFalse(any(isinstance(r,M.ProtoOAClosePositionReq) for r in self.conn.requests))
     async def test_broker_rejection_is_recorded_and_not_retried(self):

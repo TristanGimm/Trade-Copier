@@ -17,8 +17,8 @@ def trip(reason,account_id=None):
     with store.db() as c:
         c.execute("UPDATE settings SET value='true' WHERE key='paused'")
         c.execute("INSERT OR REPLACE INTO settings VALUES('safety_latched','true')")
-        followers=c.execute("SELECT id FROM accounts WHERE (role='follower' OR (role='master' AND EXISTS(SELECT 1 FROM accounts WHERE role='overlord')))"+(' AND id=?' if account_id else ''),(account_id,) if account_id else ()).fetchall()
-        for a in followers:
+        slaves=c.execute("SELECT id FROM accounts WHERE (role='slave' OR (role='master' AND EXISTS(SELECT 1 FROM accounts WHERE role='overlord')))"+(' AND id=?' if account_id else ''),(account_id,) if account_id else ()).fetchall()
+        for a in slaves:
             c.execute("INSERT OR IGNORE INTO liquidations(account_id,reason,status,created) VALUES(?,?,'queued',?)",(a['id'],reason,time.time()))
         c.execute('INSERT INTO audit(event) VALUES(?)',('SAFETY STOP: '+reason,))
 
@@ -28,15 +28,15 @@ def guard(mapping):
     source=store.one('SELECT * FROM master_positions WHERE account_id=? AND position_id=?',(mapping['master_account'],mapping['master_position']))
     if not source or source['closed'] or time.time()-mapping['created']>policy()['max_signal_age']:
         raise EntryBlocked('Signal closed or too old')
-    a=store.account(mapping['follower_account'])
-    if store.one("SELECT 1 FROM account_removals WHERE account_id IN (?,?) AND status='queued'",(mapping['master_account'],mapping['follower_account'])):raise EntryBlocked('Account removal is pending')
+    a=store.account(mapping['slave_account'])
+    if store.one("SELECT 1 FROM account_removals WHERE account_id IN (?,?) AND status='queued'",(mapping['master_account'],mapping['slave_account'])):raise EntryBlocked('Account removal is pending')
     if not a or not a['enabled']:raise EntryBlocked('Slave disabled')
     # Reservations include pending/in-flight/ambiguous opens, surviving process restarts.
     p=policy()
-    recent=store.one("SELECT COUNT(*) n FROM mappings WHERE follower_account=? AND created>=? AND created<=?",(a['id'],mapping['created']-p['entry_window'],mapping['created']))['n']
-    count=store.one("SELECT COUNT(*) n FROM mappings WHERE follower_account=? AND status NOT IN ('closed','failed')",(a['id'],))['n']
+    recent=store.one("SELECT COUNT(*) n FROM mappings WHERE slave_account=? AND created>=? AND created<=?",(a['id'],mapping['created']-p['entry_window'],mapping['created']))['n']
+    count=store.one("SELECT COUNT(*) n FROM mappings WHERE slave_account=? AND status NOT IN ('closed','failed')",(a['id'],))['n']
     broker_count=store.one("SELECT COUNT(*) n FROM positions WHERE account_id=? AND status='open'",(a['id'],))['n']
-    reservations=store.one("SELECT COUNT(*) n FROM mappings WHERE follower_account=? AND follower_position IS NULL AND status NOT IN ('closed','failed')",(a['id'],))['n']
+    reservations=store.one("SELECT COUNT(*) n FROM mappings WHERE slave_account=? AND slave_position IS NULL AND status NOT IN ('closed','failed')",(a['id'],))['n']
     count=max(count,broker_count+reservations)
     if recent>p['max_entries'] or count>p['max_positions']:
         trip('Entry frequency or position limit exceeded',a['id'])
@@ -56,21 +56,21 @@ class Watchdog:
     async def tick(self):
         p=policy();engine=self.engine
         for m in store.rows("SELECT * FROM mappings WHERE status NOT IN ('closed','failed')"):
-            follower=store.account(m['follower_account']);master=store.account(m['master_account'])
+            slave=store.account(m['slave_account']);master=store.account(m['master_account'])
             unhealthy=False
-            for a in (master,follower):
+            for a in (master,slave):
                 c=engine.connections.get(a['environment'])
                 unhealthy=unhealthy or not c or not c.alive or a['id'] not in engine.ready or time.time()-getattr(c,'last_received',time.time())>25 or bool(a['updated'] and time.time()-a['updated']>30)
             reason='Unconfirmed broker command' if m['status']=='uncertain' else None
             if self.expired((m['id'],'connection'),unhealthy,p['disconnect_timeout']):reason='Broker/account connection failed or account data is stale'
-            pos=store.one("SELECT * FROM positions WHERE account_id=? AND position_id=? AND status='open'",(follower['id'],m['follower_position']))
+            pos=store.one("SELECT * FROM positions WHERE account_id=? AND position_id=? AND status='open'",(slave['id'],m['slave_position']))
             src=store.one('SELECT * FROM master_positions WHERE account_id=? AND position_id=?',(master['id'],m['master_position']))
             if pos and src:
                 mismatch=any(not m[k+'_override'] and pos[k]!=src[k] for k in ('sl','tp'))
                 if self.expired((m['id'],'protection'),mismatch,p['protection_timeout']):reason='SL/TP not confirmed before deadline'
                 if self.expired((m['id'],'unprotected'),pos['sl'] is None,p['unprotected_timeout']):reason='Slave without stop loss: protection deadline exceeded'
             if m['error'] and m['status']=='active':reason='Synchronization error: '+m['error']
-            if reason and not store.one('SELECT 1 FROM liquidations WHERE account_id=?',(follower['id'],)):trip(reason,follower['id'])
+            if reason and not store.one('SELECT 1 FROM liquidations WHERE account_id=?',(slave['id'],)):trip(reason,slave['id'])
         for a in store.rows('SELECT account_id FROM liquidations'):
             aid=a['account_id'];task=self.tasks.get(aid)
             if not task or task.done():
@@ -86,13 +86,13 @@ class Watchdog:
         if not c or not c.alive or (aid not in e.ready and aid not in e.authenticated):
             store.execute("UPDATE liquidations SET status='waiting',error='Broker disconnected: close waits for reconnection' WHERE account_id=?",(aid,));return
         # Normal copies finish their acknowledgement first. The latch already blocks queued opens.
-        running=[t for mid,t in e.sync_tasks.items() if not t.done() and store.one('SELECT 1 FROM mappings WHERE id=? AND follower_account=?',(mid,aid))]
+        running=[t for mid,t in e.sync_tasks.items() if not t.done() and store.one('SELECT 1 FROM mappings WHERE id=? AND slave_account=?',(mid,aid))]
         if running:return
         snapshot=await c.request(M.ProtoOAReconcileReq(ctidTraderAccountId=a['broker_id']),timeout=5)
         open_ids={p.positionId for p in snapshot.position}
         for pos in snapshot.position:e.save_position(a,pos)
-        for m in store.rows('SELECT id,follower_position FROM mappings WHERE follower_account=?',(aid,)):
-            if m['follower_position'] and m['follower_position'] not in open_ids:
+        for m in store.rows('SELECT id,slave_position FROM mappings WHERE slave_account=?',(aid,)):
+            if m['slave_position'] and m['slave_position'] not in open_ids:
                 store.execute("UPDATE mappings SET status='closed',error=NULL WHERE id=?",(m['id'],))
                 store.execute("UPDATE commands SET status='reconciled' WHERE mapping_id=? AND kind!='open' AND status IN ('sending','uncertain')",(m['id'],))
         store.set_status('reconciled:'+aid,time.time())
@@ -108,7 +108,7 @@ class Watchdog:
             if failures>=3:
                 store.execute("UPDATE liquidations SET status='blocked',error='Broker repeatedly rejected protection request; close manually in cTrader' WHERE account_id=?",(aid,));return
             ambiguous=store.one("SELECT 1 FROM safety_actions WHERE account_id=? AND kind=? AND target=? AND status IN ('sending','uncertain')",(aid,kind,target))
-            normal_ambiguous=store.one("SELECT 1 FROM commands c JOIN mappings m ON m.id=c.mapping_id WHERE m.follower_account=? AND m.follower_position=? AND c.kind='close' AND c.status IN ('sending','uncertain')",(aid,target)) if kind=='close' else None
+            normal_ambiguous=store.one("SELECT 1 FROM commands c JOIN mappings m ON m.id=c.mapping_id WHERE m.slave_account=? AND m.slave_position=? AND c.kind='close' AND c.status IN ('sending','uncertain')",(aid,target)) if kind=='close' else None
             if ambiguous or normal_ambiguous:
                 store.execute("UPDATE liquidations SET status='uncertain',error='Unconfirmed close request: no blind retries' WHERE account_id=?",(aid,));continue
             action=secrets.token_hex(12)
@@ -118,7 +118,7 @@ class Watchdog:
                 if kind=='close':
                     if not response.HasField('position'):raise UncertainExecution('Position confirmation missing')
                     e.save_position(a,response.position)
-                    if response.position.positionStatus==2:store.execute("UPDATE mappings SET status='closed',error=NULL WHERE follower_account=? AND follower_position=?",(aid,target))
+                    if response.position.positionStatus==2:store.execute("UPDATE mappings SET status='closed',error=NULL WHERE slave_account=? AND slave_position=?",(aid,target))
                 store.execute("UPDATE safety_actions SET status='confirmed',completed=? WHERE id=?",(time.time(),action))
             except BrokerError as exc:
                 store.execute("UPDATE safety_actions SET status='rejected',error=?,completed=? WHERE id=?",(str(exc),time.time(),action))
@@ -129,7 +129,7 @@ class Watchdog:
                 store.execute("UPDATE liquidations SET status='uncertain',error='Broker confirmation missing' WHERE account_id=?",(aid,));return
         # Only a NEW broker snapshot can confirm flat; late fills keep being checked while latched.
         if not targets:
-            unresolved=store.one("SELECT 1 FROM commands c JOIN mappings m ON m.id=c.mapping_id WHERE m.follower_account=? AND c.kind='open' AND c.status IN ('sending','uncertain')",(aid,))
+            unresolved=store.one("SELECT 1 FROM commands c JOIN mappings m ON m.id=c.mapping_id WHERE m.slave_account=? AND c.kind='open' AND c.status IN ('sending','uncertain')",(aid,))
             store.execute("UPDATE liquidations SET status=?,error=?,verified=? WHERE account_id=?",('uncertain' if unresolved else 'flat','Uncertain entry: a late fill is possible' if unresolved else None,time.time(),aid))
         elif not store.one("SELECT 1 FROM safety_actions WHERE account_id=? AND status='uncertain'",(aid,)):
             store.execute("UPDATE liquidations SET status='closing' WHERE account_id=?",(aid,))
