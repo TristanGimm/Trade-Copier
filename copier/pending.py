@@ -35,7 +35,7 @@ def master_event(engine,account,order,position=None,allow_new=False):
     fresh=allow_new and not old and store.setting('paused')=='false' and engine.trading_enabled() and time.time()*1000-stamp<=safety.policy()['max_signal_age']*1000
     if fresh:
         from .engine import lots_to_volume
-        for follower in store.rows("SELECT * FROM accounts WHERE role='follower' AND enabled=1"):
+        for follower in store.copy_targets(account['role']):
             if follower['id'] not in engine.ready:continue
             volume=lots_to_volume(follower['lots'],json.loads(follower['symbol_json']))
             mid=secrets.token_hex(12)
@@ -137,7 +137,7 @@ async def sync(engine,mapping,source,follower):
     return True
 
 async def reconcile(engine,account,snapshot,connection):
-    if account['role']=='master':
+    if account['role'] in ('overlord','master'):
         live={o.orderId for o in snapshot.order}
         positions={p.positionId:p for p in snapshot.position}
         for order in snapshot.order:master_event(engine,account,order)
@@ -151,7 +151,7 @@ async def reconcile(engine,account,snapshot,connection):
                     ON CONFLICT(account_id,position_id) DO UPDATE SET closed=1,volume=0''',
                     (account['id'],pid,details.order.tradeData.volume,0,details.order.tradeData.tradeSide,None,None,details.order.executionPrice,details.order.utcLastUpdateTimestamp))
                 for m in store.rows('SELECT id FROM mappings WHERE master_account=? AND master_position=?',(account['id'],pid)):engine.schedule(m['id'])
-    else:
+    if account['role'] in ('master','follower'):
         for order in snapshot.order:follower_event(engine,account,order)
         live={o.orderId for o in snapshot.order}
         positions={p.positionId:p for p in snapshot.position}

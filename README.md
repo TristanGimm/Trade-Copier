@@ -1,6 +1,6 @@
 # GIMM · Trade Copier
 
-A self-hosted XAU/USD trade copier built with Python, the cTrader Open API, and a web dashboard. It copies confirmed position openings from one master account to up to ten follower accounts, then synchronizes stop-loss, take-profit, partial closes, and full closes.
+A self-hosted XAU/USD trade copier built with Python, the cTrader Open API, and a web dashboard. It can copy confirmed position openings directly from one master to as many follower accounts as the broker and server can support, or relay them through an Overlord → master → followers chain. It then synchronizes stop-loss, take-profit, partial closes, and full closes.
 
 The project connects a practical trading use case with asynchronous communication, persistent state, authentication, and error handling. A central engineering question is how to keep positions synchronized and traceable when connections fail or broker confirmations do not arrive.
 
@@ -8,11 +8,12 @@ The application sends real trading commands. Without authorized accounts, data v
 
 ## Purpose and features
 
-Managing several accounts manually requires repeating entries and subsequent changes. The copier handles that transfer and displays the state of each copy. Each follower has a configurable fixed lot size. Trading decisions originate on the master account; the copier does not implement an entry strategy.
+Managing several accounts manually requires repeating entries and subsequent changes. The copier handles that transfer and displays the state of each copy. Each destination has its own configurable fixed lot size. Trading decisions originate on the master account, or on the Overlord source when a relay chain is configured; the copier does not implement an entry strategy.
 
-Supported scope: one master, up to ten followers, and XAU/USD on hedging accounts. Account configuration includes Pepperstone and FTMO. FTMO capital is classified as simulated. The English interface calls followers **Slave**, while the internal API and database retain `follower`.
+Supported scope: one optional Overlord source, one relay master, multiple followers, and XAU/USD on hedging accounts. There is no application-level follower-count cap; practical scale depends on cTrader request limits, account authorization, and server capacity. Account configuration includes Pepperstone and FTMO. FTMO capital is classified as simulated. The English interface calls followers **Slave**, while the internal API and database retain `follower`.
 
 - cTrader OAuth and account discovery across multiple cTrader IDs.
+- Optional two-stage relay: Overlord source → one enabled master account → any number of configured followers. Each hop uses a confirmed broker account and its own lot setting.
 - Confirmed market entries plus mirrored limit, stop and stop-limit orders, with their protection, amendments and cancellations.
 - SL/TP synchronization, proportional partial closes, and full closes.
 - Detection of manual follower changes and restoration of master SL/TP management.
@@ -57,10 +58,10 @@ Both processes exchange state through SQLite, without an additional message brok
 ### Lifecycle of a copy
 
 1. The engine authenticates accounts and loads positions, symbol metadata, and broker volume rules. Master positions already open at startup are not copied retroactively.
-2. With copying enabled, a newly confirmed master position creates a persistent mapping for each enabled follower. A unique constraint prevents duplicate mappings of the same master position to the same follower.
+2. With copying enabled, a newly confirmed Overlord position creates a persistent mapping to the enabled relay master. The confirmed relay account then becomes the source for its enabled followers. Without an Overlord, the configured master copies directly to followers. A unique constraint prevents duplicate mappings of the same source position to the same target account.
 3. The configured fixed lot size is converted to a valid broker volume. Before sending, the engine checks pause state, safety latches, signal age, and limits.
 4. The trading intent is recorded in `commands` and sent through the appropriate live or demo connection. Execution requires a matching broker confirmation.
-5. The confirmed follower position is linked to its mapping. Subsequent master changes determine protection prices and target remaining volume. Manual SL/TP overrides are tracked separately for each field.
+5. Each confirmed destination position is linked to its mapping. Subsequent upstream changes determine protection prices and target remaining volume. Manual SL/TP overrides are tracked separately for each field.
 6. After a restart or disconnection, the engine reconciles stored mappings with broker state. Persistent `gimm:` labels help identify entries that have already executed.
 
 **A timeout does not prove that an order failed.** The broker may already have executed it. Such commands remain stored as `uncertain` and are not blindly resent. Further trading commands for that copy wait for a verifiable state. This reduces the risk of duplicate orders but may require manual investigation.
@@ -91,7 +92,7 @@ Access is designed for a private administrator. Passwords use PBKDF2-SHA256 with
 - **Pause:** Stops new copies. Existing mappings still receive protection and closing changes. `ENGINE_TRADING_ENABLED=false` disables every trading command, including emergency closes.
 - **Execution:** New limit, stop and stop-limit entry orders are mirrored before execution, with fixed follower lots and SL/TP. Existing pending orders at startup are not copied retroactively. Each broker executes independently; prices and fill timing can differ. Fills reuse the pending mapping without a second market entry.
 - **Reconnection:** Existing mappings are reconciled. Unmapped master positions created during an outage are not copied later.
-- **Emergency stop:** Closes every position and cancels pending orders on assigned followers, including manual trades and other instruments. The master remains unchanged. An unavailable broker connection prevents immediate liquidation.
+- **Emergency stop:** Closes every position and cancels pending orders on assigned followers, including manual trades and other instruments. With an Overlord chain it also closes the relay master; the Overlord source stays unchanged. An unavailable broker connection prevents immediate liquidation.
 - **Protection rules:** May close follower positions independently of the master, for example when a position lacks an SL for too long. Defaults and reset conditions are documented in the operating guide.
 - **Loss displays:** Show remaining headroom in account currency. They do not automatically block or close positions and do not implement complete prop-challenge rule monitoring.
 - **Analytics:** Maximum drawdown uses cumulative realized trading P&L. History imports start with the last 90 days; equity samples begin after connection. There is no automatic currency conversion. API output limits may restrict long-term analysis.

@@ -17,7 +17,7 @@ def trip(reason,account_id=None):
     with store.db() as c:
         c.execute("UPDATE settings SET value='true' WHERE key='paused'")
         c.execute("INSERT OR REPLACE INTO settings VALUES('safety_latched','true')")
-        followers=c.execute("SELECT id FROM accounts WHERE role='follower'"+(' AND id=?' if account_id else ''),(account_id,) if account_id else ()).fetchall()
+        followers=c.execute("SELECT id FROM accounts WHERE (role='follower' OR (role='master' AND EXISTS(SELECT 1 FROM accounts WHERE role='overlord')))"+(' AND id=?' if account_id else ''),(account_id,) if account_id else ()).fetchall()
         for a in followers:
             c.execute("INSERT OR IGNORE INTO liquidations(account_id,reason,status,created) VALUES(?,?,'queued',?)",(a['id'],reason,time.time()))
         c.execute('INSERT INTO audit(event) VALUES(?)',('SAFETY STOP: '+reason,))

@@ -107,7 +107,8 @@ class Engine:
         if asset_names.get(light.baseAssetId)!='XAU' or asset_names.get(light.quoteAssetId)!='USD':
             raise ValueError('The selected symbol is not XAU/USD.')
         symbol=(await connection.request(M.ProtoOASymbolByIdReq(ctidTraderAccountId=account['broker_id'],symbolId=[light.symbolId]))).symbol[0]
-        if account['role']=='follower':lots_to_volume(account['lots'],to_dict(symbol))
+        if account['role']=='follower' or (account['role']=='master' and store.one("SELECT 1 FROM accounts WHERE role='overlord'")):
+            lots_to_volume(account['lots'],to_dict(symbol))
         digits=trader.moneyDigits if trader.HasField('moneyDigits') else 2
         store.execute("UPDATE accounts SET currency=?,balance=?,symbol_id=?,symbol_json=?,account_type=?,status='connected',error=NULL WHERE id=?",(currency,trader.balance/(10**digits),symbol.symbolId,json.dumps(to_dict(symbol)),trader.accountType,aid))
         self.authenticated[aid]=access
@@ -145,7 +146,7 @@ class Engine:
             price=excluded.price,updated=excluded.updated,closed=excluded.closed''',
             (account['id'],pid,initial,volume,p.tradeData.tradeSide,p.stopLoss if p.HasField('stopLoss') else None,p.takeProfit if p.HasField('takeProfit') else None,p.price,stamp,int(closed),eligible))
         if not old and eligible:
-            for follower in store.rows("SELECT * FROM accounts WHERE role='follower' AND enabled=1"):
+            for follower in store.copy_targets(account['role']):
                 if follower['id'] not in self.ready:
                     store.audit('Copy skipped: '+follower['name']+' is not synchronized.');continue
                 try:volume_f=lots_to_volume(follower['lots'],json.loads(follower['symbol_json']))
@@ -254,6 +255,7 @@ class Engine:
             if not response.HasField('position'):
                 store.execute("UPDATE mappings SET status='uncertain',error='Execution without position mapping' WHERE id=?",(mid,));return
             self.save_position(follower,response.position)
+            if follower['role']=='master':self.update_master(follower,response.position,allow_new=True)
             store.execute("UPDATE mappings SET follower_position=?,initial_follower=?,status='active',error=NULL,latency_ms=? WHERE id=?",(response.position.positionId,response.position.tradeData.volume,(time.monotonic()-started)*1000,mid))
             store.audit('Trade copied: '+follower['name']+' · Master #'+str(source['position_id']))
             self.dirty.add(mid);return
@@ -346,7 +348,7 @@ class Engine:
                 if isinstance(message,M.ProtoOAExecutionEvent):
                     if message.HasField('order'):
                         pos=message.position if message.HasField('position') else None
-                        if account['role']=='master':
+                        if account['role'] in ('overlord','master'):
                             fresh=account['id'] in self.ready and message.executionType==2 and (message.order.utcLastUpdateTimestamp or message.order.tradeData.openTimestamp)>=self.started.get(account['id'],0)
                             pending_orders.master_event(self,account,message.order,pos,allow_new=fresh)
                         else:pending_orders.follower_event(self,account,message.order,pos)
@@ -360,7 +362,7 @@ class Engine:
                         if not self.save_position(account,message.position):
                             if message.position.positionStatus==2:self.request_reconcile(account)
                             continue
-                        if account['role']=='master':
+                        if account['role'] in ('overlord','master'):
                             signal_time=message.deal.executionTimestamp if message.HasField('deal') else message.position.utcLastUpdateTimestamp
                             fresh=account['id'] in self.ready and message.executionType in (3,11) and signal_time>=self.started.get(account['id'],0)
                             self.update_master(account,message.position,allow_new=fresh)
@@ -400,8 +402,8 @@ class Engine:
             for p in response.position:
                 self.detect_override(account,p)
                 self.save_position(account,p)
-                if account['role']=='master':self.update_master(account,p,allow_new=False)
-                else:
+                if account['role'] in ('overlord','master'):self.update_master(account,p,allow_new=False)
+                if account['role'] in ('master','follower'):
                     mapping=store.one('SELECT * FROM mappings WHERE follower_account=? AND label=?',(aid,p.tradeData.label))
                     pending_open=store.one("SELECT id FROM commands WHERE mapping_id=? AND kind='open' AND status IN ('sending','uncertain')",(mapping['id'],)) if mapping else None
                     if mapping and (not mapping['follower_position'] or pending_open):
@@ -410,12 +412,12 @@ class Engine:
             for p in store.rows("SELECT * FROM positions WHERE account_id=? AND status='open'",(aid,)):
                 if p['position_id'] not in live_ids:
                     store.execute("UPDATE positions SET status='closed',volume=0 WHERE account_id=? AND position_id=?",(aid,p['position_id']))
-            if account['role']=='master':
+            if account['role'] in ('overlord','master'):
                 for source in store.rows('SELECT * FROM master_positions WHERE account_id=? AND closed=0 AND position_id>0',(aid,)):
                     if source['position_id'] not in live_ids:
                         store.execute('UPDATE master_positions SET closed=1,volume=0 WHERE account_id=? AND position_id=?',(aid,source['position_id']))
                         for mapping in store.rows('SELECT id FROM mappings WHERE master_account=? AND master_position=?',(aid,source['position_id'])):self.schedule(mapping['id'])
-            else:
+            if account['role'] in ('follower','master'):
                 for mapping in store.rows("SELECT * FROM mappings WHERE follower_account=?",(aid,)):
                     if mapping['follower_position'] and mapping['follower_position'] not in live_ids:
                         store.execute("UPDATE mappings SET status='closed',error=NULL WHERE id=?",(mapping['id'],))
@@ -504,13 +506,13 @@ class Engine:
             try:
                 await self.ensure_connections()
                 await self.remove_accounts()
-                for account in store.rows("SELECT * FROM accounts ORDER BY CASE role WHEN 'follower' THEN 0 ELSE 1 END"):
+                for account in store.rows("SELECT * FROM accounts ORDER BY CASE role WHEN 'overlord' THEN 0 WHEN 'master' THEN 1 ELSE 2 END"):
                     aid=account['id']
                     try:
                         await self.initialize_account(account)
                         if aid not in self.ready:continue
                         account=store.account(aid)
-                        if time.time()-last_reconcile.get(aid,0)>(3 if account['role']=='master' else 10):
+                        if time.time()-last_reconcile.get(aid,0)>(3 if account['role'] in ('overlord','master') else 10):
                             await self.reconcile(account);last_reconcile[aid]=time.time()
                         if time.time()-last_snapshot.get(aid,0)>5:
                             await self.snapshot(account);last_snapshot[aid]=time.time()

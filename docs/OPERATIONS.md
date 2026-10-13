@@ -46,17 +46,17 @@ set +a
 1. Open `http://localhost:8080` and enter your email, password of at least 12 characters, and setup token.
 2. Choose **Connect cTrader** and authorize accounts with the `trading` permission. Repeat for both IDs if Pepperstone and FTMO use separate cTrader IDs.
 3. Authorized accounts appear under **Settings → Available cTrader accounts**. The OAuth flow may return without `state`. In that case, the application requires explicit completion of the authorization just started in the signed-in workspace; it does not silently exchange the code. When returned, state is strictly validated. Authorizations belonging to another session are rejected.
-4. Choose **Add account** and assign Pepperstone as master and FTMO as follower. FTMO capital must be classified as simulated. Enter the exact broker symbol name for XAU/USD, such as `XAUUSD`; suffixes are not guessed.
-5. Wait for both accounts to synchronize. Under **Copy Engine**, configure lots and enable the desired follower.
-6. Choose **Enable new copies**. Only **new** confirmed master entries are copied. Master positions already open at startup are not opened retroactively on followers.
+4. Choose **Add account** and assign roles: optionally one **Overlord** source, one **Master** relay, then as many **Slave** destinations as your broker authorizes. FTMO capital must be classified as simulated. Enter the exact broker symbol name for XAU/USD, such as `XAUUSD`; suffixes are not guessed.
+5. Wait for the accounts to synchronize. Under **Copy Engine**, set a separate lot size for each destination and enable each copy rule. In an Overlord chain, enable the Master relay to receive Overlord trades; enable each Slave to receive the relay's confirmed orders.
+6. Choose **Enable new copies**. Only **new** confirmed entries are copied. Positions already open at startup are not opened retroactively at the next hop.
 
 `ENGINE_TRADING_ENABLED=true` permits trading commands, but new copies still start paused in the database. `ENGINE_TRADING_ENABLED=false` disables **all** trading commands, including management of existing copied positions. Use the dashboard pause control for normal pauses.
 
 ## Exact copying behavior and limitations
 
-- **Hedging accounts:** Netting and limited-risk accounts are rejected with an explanation because they do not reliably support individual position mappings or entry without SL. Master and follower accounts must support hedging.
+- **Hedging accounts:** Netting and limited-risk accounts are rejected with an explanation because they do not reliably support individual position mappings or entry without SL. Overlord, relay master, and slave accounts must support hedging.
 - **XAU/USD only:** The engine also validates the selected symbol's base and quote assets. Other master instruments are ignored.
-- **Fixed lots:** Each new master position receives an individual fixed follower size. A new hedging position creates a new copy. Volume increases within the same position ID do not add another fixed lot allocation; the maximum master volume becomes the reference for subsequent partial closes.
+- **Fixed lots:** Each copy hop has an independent fixed lot size. There is no application-level follower-count cap; cTrader request budgets, the number of authorized accounts, and server resources limit practical scale. Each new source position creates an individual copy. Volume increases within the same position ID do not add another fixed lot allocation; the maximum source volume becomes the reference for subsequent partial closes.
 - **Volume:** API volume is expressed in hundredths of units. The broker supplies `lotSize`, minimum, maximum, and step values. Selected lots are rounded down to a valid step; no order is sent outside broker limits.
 - **Pending orders:** New limit, stop and stop-limit entry orders are mirrored with fixed follower lots, prices, SL/TP and expiry. Changes and cancellations are synchronized, including while new entries are paused. Existing orders at startup are not copied retroactively. Master and follower fills reuse the same mapping; a second market entry is not sent. Brokers execute independently, so either account can fill first. If the follower fills first and the master subsequently cancels, the follower position is closed. Pausing blocks new submissions; pending orders already at the broker remain executable.
 - **Entry protection:** If the master has no SL/TP, no artificial protection is added. Existing SL/TP distances are included in the market entry as relative distances where representable. Absolute SL/TP prices are not allowed on cTrader market orders; after the fill, the confirmed follower position is adjusted to the master's absolute prices. This creates an intermediate phase and does not guarantee atomic execution at identical prices.
@@ -71,9 +71,9 @@ set +a
 
 ## Safety stop and emergency control
 
-The red **Emergency stop** requires confirmation and immediately persists a block on new copies. The engine cancels pending orders on **all assigned followers**, including disabled followers, and closes **all positions, including manual trades and other instruments**. The master is unchanged. Only subsequent broker reconciliation confirms `flat`; sending a request does not establish successful closure. Late fills are also closed while the safety stop remains active. Repeated clicks do not start a second concurrent emergency task.
+The red **Emergency stop** requires confirmation and immediately persists a block on new copies. With an Overlord chain, the engine cancels pending orders on the relay master and **all assigned slaves**, including disabled destinations, and closes **all their positions, including manual trades and other instruments**; the Overlord source remains unchanged. Without an Overlord, it closes slaves and leaves the master unchanged. Only subsequent broker reconciliation confirms `flat`; sending a request does not establish successful closure. Late fills are also closed while the safety stop remains active. Repeated clicks do not start a second concurrent emergency task.
 
-Automatic failure stops affect all positions and orders on the **affected follower** and pause new copies globally. These defaults are configurable under **Copy Engine → Slave protection**:
+Automatic failure stops affect all positions and orders on the **affected copy target** and pause new copies globally. These defaults are configurable under **Copy Engine → Slave protection**:
 
 | Rule | Default |
 |---|---:|
@@ -90,7 +90,7 @@ Initial entry without SL remains possible, as on the master. The 30-second deadl
 
 After an emergency, affected accounts are checked continuously. **Reset safety stop** requires fresh, healthy connections, confirmed flat accounts, and no unresolved execution uncertainty. New copies remain paused afterward and must be enabled separately.
 
-The green **Connected** indicator requires a fresh website response, worker and protection heartbeats, current broker/position reconciliation for the master and all enabled accounts or accounts holding positions, confirmed protection prices, and no active errors or safety latches. Click it to inspect the individual checks. An open browser alone does not establish broker connectivity. Losing browser access does not trigger an emergency; the independent engine is intended to operate with the browser closed.
+The green **Connected** indicator requires a fresh website response, worker and protection heartbeats, current broker/position reconciliation for the Overlord source, relay master and all enabled accounts or accounts holding positions, confirmed protection prices, and no active errors or safety latches. Click it to inspect the individual checks. An open browser alone does not establish broker connectivity. Losing browser access does not trigger an emergency; the independent engine is intended to operate with the browser closed.
 
 **Technical limitation:** A disconnected broker connection cannot execute closes. The request remains persisted until reconnection. Protection monitoring also stops if the computer or engine stops. Docker restart behavior does not replace independent broker-side protection. Existing broker SL/TP orders remain relevant. These mechanisms do not guarantee control over slippage, gaps, broker rejections, or FTMO daily/total loss rules. `ENGINE_TRADING_ENABLED=false` also prevents emergency closes and leaves them waiting.
 
@@ -203,7 +203,7 @@ Further references: [Connection and heartbeat](https://help.ctrader.com/open-api
 
 ## English interface and removing accounts
 
-The website uses English labels, validation errors, alerts, dialogs, activity messages, date formatting and CSV headers. The visible roles are **Master** and **Slave**. The internal `follower` API/database value is retained for compatibility with existing configurations; it is displayed as Slave. Existing technical activity messages are translated for display without changing historical records or user-defined account names.
+The website uses English labels, validation errors, alerts, dialogs, activity messages, date formatting and CSV headers. The visible roles are **Overlord**, **Master**, and **Slave**. The internal `follower` API/database value is retained for compatibility with existing configurations; it is displayed as Slave. Existing technical activity messages are translated for display without changing historical records or user-defined account names.
 
 Under **Trading accounts**, choose **Remove**, then confirm **Remove account**. This pauses new copies globally and disables new entries to that account while the engine checks the broker. Removal requires an online, synchronized account with no positions, no pending orders, no active copy mappings and no unresolved broker commands. A blocked removal shows its reason beside the account: resolve it in cTrader and retry Remove. No position is closed by the removal action itself.
 

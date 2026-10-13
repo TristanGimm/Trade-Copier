@@ -46,6 +46,7 @@ def init():
           status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated REAL,account_type INTEGER,
           UNIQUE(broker_id,environment));
         CREATE UNIQUE INDEX IF NOT EXISTS single_master ON accounts(role) WHERE role='master';
+        CREATE UNIQUE INDEX IF NOT EXISTS single_overlord ON accounts(role) WHERE role='overlord';
         CREATE TABLE IF NOT EXISTS positions(
           account_id TEXT,position_id INTEGER,volume INTEGER,side INTEGER,price REAL,sl REAL,tp REAL,
           label TEXT,opened INTEGER,updated INTEGER,status TEXT,pnl REAL,symbol_id INTEGER,
@@ -98,6 +99,12 @@ def execute(query, args=()):
     with db() as c:
         return c.execute(query, args).rowcount
 
+def copy_targets(role):
+    """Return the enabled next hop for this source in the fixed two-tier topology."""
+    if role=='overlord':return rows("SELECT * FROM accounts WHERE role='master' AND enabled=1")
+    if role=='master':return rows("SELECT * FROM accounts WHERE role='follower' AND enabled=1")
+    return []
+
 def audit(event):
     execute('INSERT INTO audit(event) VALUES(?)', (event,))
 
@@ -139,10 +146,11 @@ def public_state():
             a.pop(key,None)
     status={r['key']:json.loads(r['value']) for r in rows('SELECT * FROM engine_status')}
     status['stale']=time.time()-status.get('heartbeat',0)>20
-    relevant=[a for a in accounts if a['role']=='master' or a['enabled'] or one("SELECT 1 FROM positions WHERE account_id=? AND status='open'",(a['id'],))]
+    relevant=[a for a in accounts if a['role'] in ('overlord','master') or a['enabled'] or one("SELECT 1 FROM positions WHERE account_id=? AND status='open'",(a['id'],))]
+    has_overlord=any(a['role']=='overlord' for a in relevant)
     checks=[{'label':'Copy-Engine','ok':not status['stale']},
             {'label':'Protection monitor','ok':time.time()-status.get('safety_heartbeat',0)<5 and not status.get('safety_error')},
-            {'label':'Master and slave assigned','ok':any(a['role']=='master' for a in relevant) and any(a['role']=='follower' for a in relevant)},
+            {'label':'Copy chain assigned','ok':any(a['role']=='master' for a in relevant) and any(a['role']=='follower' for a in relevant) and (not has_overlord or any(a['role']=='master' and a['enabled'] for a in relevant))},
             {'label':'Trade execution','ok':bool(status.get('trading_enabled'))},
             {'label':'Protection prices confirmed','ok':not one("SELECT 1 FROM mappings m JOIN master_positions s ON s.account_id=m.master_account AND s.position_id=m.master_position JOIN positions p ON p.account_id=m.follower_account AND p.position_id=m.follower_position WHERE m.status='active' AND p.status='open' AND ((m.sl_override=0 AND p.sl IS NOT s.sl) OR (m.tp_override=0 AND p.tp IS NOT s.tp))")},
             {'label':'No safety stop','ok':setting('safety_latched')!='true'},
