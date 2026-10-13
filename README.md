@@ -156,3 +156,9 @@ Automated tests do not replace execution checks with your own broker demo accoun
 `.env`, `data/`, local environments, and test artifacts are git-ignored. Credentials, databases, and screenshots containing account details should stay outside a public repository. Spotware protocol files have their [own license](copier/protocol/LICENSE); the generated classes are not an independently designed protocol implementation.
 
 A draft project introduction is available in [docs/LINKEDIN.md](docs/LINKEDIN.md).
+
+### iPhone app
+
+An Xcode project for the iPhone is in [`ios/CopierEngine/`](ios/CopierEngine/). It opens the private dashboard inside a native iOS app shell and uses the existing HTTPS service at `copier-engine.gimmholding.com`; the copier engine and broker connections continue to run on the server. The app keeps its HttpOnly login cookie in iOS's persistent web data store. Sessions renew while the app is used and expire after one year of inactivity.
+
+To install it from a Mac with Xcode, open `ios/CopierEngine/CopierEngine.xcodeproj`, select the `CopierEngine` target, choose your Apple development team under Signing & Capabilities, connect your iPhone, and press Run. The first launch requires an internet connection and the server must be reachable over HTTPS. The iOS app icon is included in the project assets.

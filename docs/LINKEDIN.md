@@ -1,19 +1,15 @@
-# LinkedIn draft
+# LinkedIn project post
 
-I'd like to share a software project from my portfolio: a self-hosted XAU/USD trade copier using Python and the cTrader Open API.
+I built a self-hosted XAU/USD trade copier with Python and the cTrader Open API.
 
-The application copies confirmed position openings from a master account to multiple follower accounts. It then synchronizes stop-loss, take-profit, partial closes, and full closes. A web dashboard displays accounts, position mappings, activity, and analytics based on imported broker data.
+It mirrors confirmed master-account entries to configured follower accounts and keeps stop-loss, take-profit, partial closes, and full closes in sync. A private dashboard shows broker-backed account state, copy mappings, activity, and trading analytics. An iOS companion app wraps the dashboard in a SwiftUI app shell.
 
-One technical detail I find particularly interesting is uncertain execution: when a broker response is missing, the order may still have executed. The engine therefore persists trading intents and reconciles them against broker state instead of simply sending the order again.
+One engineering problem stood out: a timeout does not tell you whether a broker executed an order. The engine records trading intent before sending commands and reconciles uncertain outcomes against broker state instead of blindly retrying them. The web server and asynchronous copy engine run as separate processes and coordinate through SQLite.
 
-The architecture uses separate Python processes for the web server and copy engine, a shared SQLite database, and an asynchronous TLS/Protobuf transport. Tests with simulated broker responses cover duplicate events, position closes, and connection failures.
+The project includes session and CSRF protections, encrypted cTrader tokens, an emergency stop, and configurable safety rules. Automated tests use simulated broker responses; they cannot replace validation with broker demo accounts. The software can send real trading commands, so the repository makes no claims about returns or trading performance.
 
-The project provides a practical starting point for discussing asynchronous processing, state management, and the limits of automated tests when working with external APIs.
+Code and architecture: https://github.com/TristanGimm/Trade-Copier
 
-Code and architecture: [Add GitHub repository link before publishing]
+#Python #SoftwareEngineering #AsyncIO #FinTech #iOS
 
-#Python #SoftwareEngineering #AsyncIO #Portfolio
-
----
-
-Before publishing, add the repository link. Describe your personal development contribution, studies, or use of development tools according to the work you actually did; this draft does not assume those facts. Choose screenshots without account numbers, personal information, or credentials.
+Before sharing screenshots, use a clean demo workspace and remove account numbers, balances, names, OAuth details, and any other personal or financial information.

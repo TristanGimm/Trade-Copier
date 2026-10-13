@@ -17,6 +17,7 @@ from copier import store, oauth
 DB=os.environ.get('DATABASE_PATH','data/copier.db')
 ORIGIN=os.environ.get('APP_ORIGIN','http://localhost:8080').rstrip('/')
 SECURE=ORIGIN.startswith('https://')
+SESSION_TTL=365*24*60*60
 ATTEMPTS={}
 ATTEMPT_LOCK=threading.Lock()
 
@@ -57,14 +58,19 @@ class Handler(SimpleHTTPRequestHandler):
         raw=json.dumps(data,allow_nan=False).encode();self.send_response(status)
         self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store')
         self.send_header('Content-Length',str(len(raw)))
-        if cookie:self.send_header('Set-Cookie',cookie)
+        if cookie or getattr(self,'renewed_session_cookie',None):self.send_header('Set-Cookie',cookie or self.renewed_session_cookie)
         self.end_headers();self.wfile.write(raw)
     def session(self):
         cookie=SimpleCookie()
         try:cookie.load(self.headers.get('Cookie',''))
         except Exception:return None
         token=cookie.get('session');token=token.value if token else ''
-        return store.one('SELECT sessions.*,users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time()))
+        session=store.one('SELECT sessions.*,users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time()))
+        if session and session['expires']<time.time()+SESSION_TTL*2/3:
+            expires=time.time()+SESSION_TTL
+            with store.db() as c:c.execute('UPDATE sessions SET expires=? WHERE token=?',(expires,session['token']))
+            self.renewed_session_cookie='session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+str(SESSION_TTL)+('; Secure' if SECURE else '')
+        return session
     def do_GET(self):
         path=urlparse(self.path).path
         if path=='/health':
@@ -235,8 +241,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not user or not valid:return self.output({'error':'Invalid credentials.'},401)
             token=secrets.token_urlsafe(32);csrf=secrets.token_urlsafe(32)
             c.execute('DELETE FROM sessions WHERE expires<?',(now,))
-            c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user['id'],now+43200,csrf))
-        return self.output({'ok':True,'csrf':csrf},cookie='session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200'+('; Secure' if SECURE else ''))
+            c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user['id'],now+SESSION_TTL,csrf))
+        return self.output({'ok':True,'csrf':csrf},cookie='session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+str(SESSION_TTL)+('; Secure' if SECURE else ''))
 
 if __name__=='__main__':
     init();ThreadingHTTPServer(('0.0.0.0',int(os.environ.get('PORT','8080'))),Handler).serve_forever()
