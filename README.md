@@ -1,4 +1,4 @@
-# GIMM · Trade Copier
+# Trade Copier Engine
 
 A self-hosted XAU/USD trade copier built with Python, the cTrader Open API, and a web dashboard. It can copy confirmed position openings directly from one overlord to one master and from there to many slave accounts as the broker and my self-hosted kubernetes infrastructure can support, or relay them through an Overlord --> master --> slaves chain. It then synchronizes stop-loss, take-profit, partial closes, and full closes so everything moves as one.
 
