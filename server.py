@@ -20,6 +20,26 @@ SECURE=ORIGIN.startswith('https://')
 SESSION_TTL=365*24*60*60
 ATTEMPTS={}
 ATTEMPT_LOCK=threading.Lock()
+PUBLIC=Path(__file__).parent/'public'
+_ASSET_VERSION=None
+
+def asset_version():
+    """A token that changes whenever CSS or JS changes.
+
+    Browsers kept serving the previous app.js after a deploy: the old response
+    had no cache policy, so the browser applied heuristic freshness and never
+    asked again. Versioning the URL makes the new file a different resource, so
+    no stale copy can be reused no matter what was cached before.
+    """
+    global _ASSET_VERSION
+    if _ASSET_VERSION is None:
+        stamps=[]
+        for name in ('style.css','app.js','landing.js','auth.css'):
+            try:stamps.append(str(int((PUBLIC/name).stat().st_mtime)))
+            except OSError:pass
+        _ASSET_VERSION='-'.join(stamps) or '1'
+    return _ASSET_VERSION
+
 EMAIL_PATTERN=re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')
 
 def connect():return store.db()
@@ -80,6 +100,22 @@ class Handler(SimpleHTTPRequestHandler):
             with store.db() as c:c.execute('UPDATE sessions SET expires=? WHERE token=?',(expires,session['token']))
             self.renewed_session_cookie='session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+str(SESSION_TTL)+('; Secure' if SECURE else '')
         return session
+    def document(self,name):
+        """Send an HTML document with versioned asset URLs and no caching."""
+        try:raw=(PUBLIC/name).read_text('utf-8')
+        except OSError:
+            self.send_error(404);return
+        version=asset_version()
+        for asset in ('style.css','app.js','landing.js','auth.css'):
+            raw=raw.replace('"/%s"'%asset,'"/%s?v=%s"'%(asset,version))
+        body=raw.encode()
+        self.send_response(200)
+        self.send_header('Content-Type','text/html; charset=utf-8')
+        self.send_header('Cache-Control','no-store')
+        self.send_header('Content-Length',str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path=urlparse(self.path).path
         if path=='/health':
@@ -102,14 +138,13 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_response(302);self.send_header('Location','/app')
                 self.send_header('Cache-Control','no-store');self.end_headers()
                 return
-            self.path='/landing.html'
-            return super().do_GET()
+            return self.document('landing.html')
         if path=='/login':
-            # Alias so the three products share one sign-in URL shape.
-            target=urlparse(self.path).query
-            self.path='/index.html'+(('?'+target) if target else '')
-            return super().do_GET()
-        if path in ('/app','/ctrader/callback'):self.path='/index.html'
+            # Alias so the three products share one sign-in URL shape. The app
+            # reads ?mode= from the address bar, so the query is kept as-is.
+            return self.document('index.html')
+        if path in ('/app','/ctrader/callback'):
+            return self.document('index.html')
         return super().do_GET()
     def same_origin(self):
         """True when the request comes from this app's own origin.
