@@ -24,6 +24,14 @@ def db():
 def init():
     with db() as c:
         c.execute('PRAGMA journal_mode=WAL')
+        # Login moved from email to username so the three products share one
+        # credential shape. Older databases get the column and a backfill.
+        users_table = c.execute("SELECT name FROM sqlite_master WHERE name='users'").fetchone()
+        if users_table and 'username' not in [x[1] for x in c.execute('PRAGMA table_info(users)')]:
+            c.execute('ALTER TABLE users ADD COLUMN username TEXT')
+        if users_table:
+            c.execute("UPDATE users SET username=lower(email) WHERE username IS NULL OR username=''")
+            c.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)')
         old = c.execute("SELECT name FROM sqlite_master WHERE name='accounts'").fetchone()
         if old and 'broker_id' not in [x[1] for x in c.execute('PRAGMA table_info(accounts)')]:
             # Preserve old configuration for inspection, never promote example data to live data.
@@ -31,7 +39,7 @@ def init():
             c.execute("DELETE FROM settings WHERE key='paused'")
             c.execute("DELETE FROM audit WHERE event LIKE 'Demo%'")
         c.executescript('''
-        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE,salt TEXT,hash TEXT);
+        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE,salt TEXT,hash TEXT,username TEXT);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id INTEGER,expires REAL,csrf TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,created TEXT DEFAULT CURRENT_TIMESTAMP,event TEXT);

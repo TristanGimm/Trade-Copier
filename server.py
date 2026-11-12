@@ -20,6 +20,7 @@ SECURE=ORIGIN.startswith('https://')
 SESSION_TTL=365*24*60*60
 ATTEMPTS={}
 ATTEMPT_LOCK=threading.Lock()
+EMAIL_PATTERN=re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')
 
 def connect():return store.db()
 def init():
@@ -65,7 +66,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:cookie.load(self.headers.get('Cookie',''))
         except Exception:return None
         token=cookie.get('session');token=token.value if token else ''
-        session=store.one('SELECT sessions.*,users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time()))
+        session=store.one('SELECT sessions.*,users.username,users.email FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time()))
         if session and session['expires']<time.time()+SESSION_TTL*2/3:
             expires=time.time()+SESSION_TTL
             with store.db() as c:c.execute('UPDATE sessions SET expires=? WHERE token=?',(expires,session['token']))
@@ -78,15 +79,42 @@ class Handler(SimpleHTTPRequestHandler):
             return self.output({'ok':True,'engineRunning':bool(heartbeat and time.time()-json.loads(heartbeat['value'])<20)})
         if path=='/api/session':
             session=self.session();setup=not store.one('SELECT 1 FROM users')
-            return self.output({'authenticated':bool(session),'setupRequired':setup,'email':session['email'] if session else None,'csrf':session['csrf'] if session else None})
+            return self.output({'authenticated':bool(session),'setupRequired':setup,'username':session['username'] if session else None,'csrf':session['csrf'] if session else None})
         if path.startswith('/api/'):
             if not self.session():return self.output({'error':'Please sign in.'},401)
             if path=='/api/state':return self.output(store.public_state())
             return self.output({'error':'Not found.'},404)
-        if path in ('/','/ctrader/callback'):self.path='/index.html'
+        if path=='/':
+            # Anonymous visitors see the shared landing page; the application
+            # itself lives at /app so the landing can stay a plain marketing
+            # screen with no session data on it. A signed-in visitor gets the
+            # app directly -- delegating to '/app' as a static path would 404,
+            # because the app is index.html, not a file called 'app'.
+            self.path='/index.html' if self.session() else '/landing.html'
+            return super().do_GET()
+        if path=='/login':
+            # Alias so the three products share one sign-in URL shape.
+            target=urlparse(self.path).query
+            self.path='/index.html'+(('?'+target) if target else '')
+            return super().do_GET()
+        if path in ('/app','/ctrader/callback'):self.path='/index.html'
         return super().do_GET()
+    def same_origin(self):
+        """True when the request comes from this app's own origin.
+
+        Exact match against APP_ORIGIN is the rule. A loopback server is reached
+        as both 127.0.0.1 and localhost, and the browser sends whichever
+        spelling it was opened with, so the sibling loopback name on the same
+        scheme and port is accepted too. A real domain stays exact-match only.
+        """
+        origin=self.headers.get('Origin','')
+        if origin==ORIGIN:return True
+        configured=urlparse(ORIGIN);candidate=urlparse(origin)
+        loopback={'localhost','127.0.0.1','::1'}
+        if configured.hostname not in loopback or candidate.hostname not in loopback:return False
+        return candidate.scheme==configured.scheme and candidate.port==configured.port
     def do_POST(self):
-        if self.headers.get('Origin')!=ORIGIN:return self.output({'error':'Origin not allowed.'},403)
+        if not self.same_origin():return self.output({'error':'Origin not allowed.'},403)
         try:
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=16384:return self.output({'error':'Invalid request size.'},413)
@@ -95,7 +123,7 @@ class Handler(SimpleHTTPRequestHandler):
         except (ValueError,UnicodeDecodeError):return self.output({'error':'Invalid request.'},400)
         path=urlparse(self.path).path
         try:
-            if path in ('/api/setup','/api/login'):return self.login(path,body)
+            if path in ('/api/setup','/api/login','/api/register','/api/reset'):return self.login(path,body)
             session=self.session()
             if not session:return self.output({'error':'Please sign in.'},401)
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),session['csrf']):return self.output({'error':'Invalid session.'},403)
@@ -228,17 +256,47 @@ class Handler(SimpleHTTPRequestHandler):
             attempts=ATTEMPTS.setdefault(ip,[]);attempts[:]=[x for x in attempts if x>now-300]
             if len(attempts)>=10:return self.output({'error':'Too many attempts. Try again in five minutes.'},429)
             attempts.append(now)
-        email=str(body.get('email','')).strip().lower();password=str(body.get('password',''))
-        if len(email)>254 or len(password)>512:raise ValueError('Credentials are too long.')
+        # The login identifier is a username, matching the trading dashboard.
+        # `email` is still accepted so existing bookmarks and scripts keep working.
+        raw=str(body.get('username') or body.get('email') or '').strip()
+        password=str(body.get('password',''))
+        if not raw or len(raw)>254 or len(password)>512:raise ValueError('Credentials are too long.')
         with store.db() as c:
-            if path=='/api/setup':
-                c.execute('BEGIN IMMEDIATE')
-                if c.execute('SELECT 1 FROM users').fetchone():return self.output({'error':'Setup already completed.'},409)
+            if path in ('/api/setup','/api/register','/api/reset'):
+                # Creating or resetting an account is gated by SETUP_TOKEN, a
+                # server-side secret. Without it anyone who reached the page could
+                # register into a private trading workspace.
                 secret=os.environ.get('SETUP_TOKEN','')
-                if not secret or not hmac.compare_digest(str(body.get('setupToken','')),secret):return self.output({'error':'Invalid setup token.'},403)
-                if len(password)<12 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise ValueError('A valid email and a password of at least 12 characters are required.')
-                salt=secrets.token_hex(16);c.execute('INSERT INTO users(email,salt,hash) VALUES(?,?,?)',(email,salt,password_hash(password,salt)))
-            user=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+                supplied=str(body.get('setupToken',''))
+                if not secret or not hmac.compare_digest(supplied,secret):return self.output({'error':'Invalid setup token.'},403)
+                if len(password)<12:raise ValueError('Use a password of at least 12 characters.')
+                if len(raw)<2:raise ValueError('Use a username of at least 2 characters.')
+                # Registration carries the account's contact address; reset does
+                # not, because the sign-in name may be either one.
+                email=str(body.get('email','')).strip()
+                if path=='/api/reset':
+                    email=None
+                elif not email and path=='/api/setup':
+                    email=raw  # the legacy alias may carry no separate address
+                if email is not None and (len(email)>254 or not EMAIL_PATTERN.match(email)):
+                    raise ValueError('Enter a valid email address.')
+                salt=secrets.token_hex(16);digest=password_hash(password,salt)
+                c.execute('BEGIN IMMEDIATE')
+                # Case-insensitive lookups so "Tristan Gimm" and "tristan gimm"
+                # are one account, while the display keeps the typed spelling.
+                if path=='/api/reset':
+                    # The address identifies the account too, so a forgotten
+                    # username is recoverable.
+                    existing=c.execute('SELECT id FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE NOCASE',(raw,raw)).fetchone()
+                    if not existing:return self.output({'error':'No account with that username or email.'},404)
+                    c.execute('UPDATE users SET salt=?,hash=? WHERE id=?',(salt,digest,existing['id']))
+                elif c.execute('SELECT 1 FROM users WHERE username=? COLLATE NOCASE',(raw,)).fetchone():
+                    return self.output({'error':'That username is already taken.'},409)
+                elif c.execute('SELECT 1 FROM users WHERE email=? COLLATE NOCASE',(email,)).fetchone():
+                    return self.output({'error':'That email address is already registered.'},409)
+                else:
+                    c.execute('INSERT INTO users(username,email,salt,hash) VALUES(?,?,?,?)',(raw,email,salt,digest))
+            user=c.execute('SELECT * FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE NOCASE',(raw,raw)).fetchone()
             salt=user['salt'] if user else '0'*32
             valid=hmac.compare_digest(password_hash(password,salt),user['hash'] if user else '0'*64)
             if not user or not valid:return self.output({'error':'Invalid credentials.'},401)

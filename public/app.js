@@ -61,12 +61,109 @@ async function start(){
   },5000);
  }catch(error){app.innerHTML=`<div class="empty"><h3>Workspace unavailable</h3><p>${esc(error.message)}</p><button id="retry">Try again</button></div>`;document.querySelector('#retry').onclick=start}
 }
+
+/* Persistent backdrop behind both the sign-in view and the workspace. It lives
+   outside #app, so the five-second state refresh never restarts the clips. */
+function backdrop(){
+  const wide=document.querySelector('#bg-wide'),tall=document.querySelector('#bg-tall');
+  if(!wide||!tall)return;
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)'),portrait=matchMedia('(orientation: portrait)');
+  const useTall=()=>portrait.matches||innerWidth<innerHeight;
+  const apply=()=>{
+    const t=useTall(),active=t?tall:wide,idle=t?wide:tall;
+    wide.classList.toggle('on',!t);tall.classList.toggle('on',t);
+    idle.pause();
+    if(reduced.matches)active.pause();else active.play().catch(()=>{});
+  };
+  const scenes=[['/videos/globe-landscape.mp4','/videos/globe-portrait.mp4'],['/videos/horizon-landscape.mp4','/videos/horizon-portrait.mp4']];
+  let index=0;
+  apply();
+  portrait.addEventListener('change',apply);addEventListener('resize',apply);
+  if(!reduced.matches)setInterval(()=>{
+    index=(index+1)%scenes.length;
+    const t=useTall(),el=t?tall:wide,other=t?wide:tall;
+    other.classList.remove('on');el.classList.remove('on');
+    el.src=scenes[index][t?1:0];el.load();el.play().catch(()=>{});el.classList.add('on');
+  },120000);
+  document.addEventListener('visibilitychange',()=>{
+    const active=wide.classList.contains('on')?wide:tall;
+    if(document.hidden)active.pause();else if(!reduced.matches)active.play().catch(()=>{});
+  });
+}
+
+/* Navigation button: opens on hover and on click; links point at the local
+   ports when this page is served from this machine. */
+function navDropdown(){
+  const box=document.querySelector('#nav-switch');
+  if(!box)return;
+  const button=box.querySelector('button');
+  let timer=null,openedByHover=false;
+  const setOpen=open=>{box.classList.toggle('open',open);button.setAttribute('aria-expanded',open?'true':'false')};
+  // Hover opens the menu before the click lands; a click after hovering must
+  // not immediately close what the pointer just opened.
+  button.onclick=event=>{event.stopPropagation();if(openedByHover){openedByHover=false;return}setOpen(!box.classList.contains('open'))};
+  box.onmouseenter=()=>{clearTimeout(timer);if(!box.classList.contains('open')){openedByHover=true;setOpen(true)}};
+  box.onmouseleave=()=>{clearTimeout(timer);openedByHover=false;timer=setTimeout(()=>setOpen(false),140)};
+  const host=location.hostname;
+  if(host!=='localhost'&&host!=='127.0.0.1'&&!/\.local$/.test(host))return;
+  const scheme=location.protocol==='https:'?'https':'http';
+  box.querySelectorAll('a[data-port]').forEach(link=>{link.href=scheme+'://'+host+':'+link.getAttribute('data-port')+(link.dataset.path||'/')});
+}
+/* One delegated listener for the whole app: render() replaces the switcher
+   every poll, and per-render document listeners would accumulate. */
+document.addEventListener('click',()=>{const box=document.querySelector('#nav-switch');if(!box)return;box.classList.remove('open');box.querySelector('button')?.setAttribute('aria-expanded','false')});
+document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;const box=document.querySelector('#nav-switch');if(!box)return;box.classList.remove('open');box.querySelector('button')?.setAttribute('aria-expanded','false')});
+
 function auth(){
  clearInterval(pollTimer);
- app.innerHTML=`<div class="auth"><section class="auth-visual"><div class="brand"><span class="mark">${icon('chart')}</span><div>GIMM <b>/</b><small>COPIER ENGINE</small></div></div><div><div class="eyebrow">YOUR PRIVATE TRADING INFRASTRUCTURE</div><h1>One strategy.<br>Every account.<br><span class="accent">Your edge.</span></h1><p>Your private XAU/USD workspace. Connect your cTrader accounts and track execution, risk and performance.</p></div><small>GIMM HOLDING · EUROPE / BERLIN</small></section><form class="auth-form" id="auth-form"><div class="eyebrow">PRIVATE WORKSPACE</div><h1>${session.setupRequired?'Your workspace starts here.':'Welcome back.'}</h1><p>${session.setupRequired?'Create your administrator account using the setup token from your server configuration.':'Sign in to open your trading workspace.'}</p><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="username" maxlength="254" required placeholder="name@gimmholding.com"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${session.setupRequired?'new-password':'current-password'}" minlength="${session.setupRequired?12:1}" maxlength="512" required>${session.setupRequired?'<label for="setupToken">Setup-Token</label><input id="setupToken" name="setupToken" type="password" required autocomplete="off">':''}<div class="error" id="auth-error" role="alert"></div><button class="primary">${session.setupRequired?'Create workspace':'Sign in'} ${icon('arrow')}</button><p style="font-size:10px;margin-top:22px">Private access · Server-side sessions</p></form></div>`;
+ const mode=new URL(location.href).searchParams.get('mode')==='register'?'register':new URL(location.href).searchParams.get('mode')==='reset'?'reset':'signin';
+ document.body.classList.add('auth-mode');document.body.classList.remove('app-mode');
+ app.innerHTML=`<div class="auth">
+  <header class="auth-head">
+    <div class="auth-head-left">
+      <span class="mark">${icon('chart')}</span>
+      <div class="auth-brand"><strong>Trade Copier Engine</strong></div>
+      <div class="nav-switch" id="nav-switch">
+        <button type="button" aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu">Navigation
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="menu" id="nav-menu" role="menu" aria-label="Products">
+          <a role="menuitem" href="https://dashboard.gimmholding.com/dashboard" data-port="3000" data-path="/dashboard"><i></i>Master Trading Dashboard</a>
+          <a role="menuitem" href="https://quant-engine.gimmholding.com/" data-port="8100" data-path="/"><i></i>Quant Engine</a>
+          <span class="current" role="menuitem" aria-current="page"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>Trade Copier Engine</span>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="auth-body">
+    <section class="auth-visual">
+      <div class="auth-company"><strong>Trade Copier Engine</strong></div>
+    </section>
+    <form class="auth-form" id="auth-form">
+      <h1>${mode==='register'?(session.setupRequired?'Create the owner account.':'Create account.'):mode==='reset'?'Reset password.':'There is no time left.'}</h1>
+      ${mode==='register'?`<label for="username">Username</label><input id="username" name="username" autocomplete="username" maxlength="64" required placeholder="Tristan Gimm">
+      <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="you@example.com">`:''}
+      ${mode==='signin'?`<label for="username">Username or email</label><input id="username" name="username" autocomplete="username" maxlength="254" required placeholder="Tristan Gimm">`:''}
+      ${mode==='reset'?`<label for="username">Username or email</label><input id="username" name="username" autocomplete="username" maxlength="254" required placeholder="Tristan Gimm">`:''}
+      <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${mode==='signin'?'current-password':'new-password'}" minlength="${mode==='signin'?1:12}" maxlength="512" required>
+      ${mode==='register'||mode==='reset'?'<label for="setupToken">Setup token</label><input id="setupToken" name="setupToken" type="password" autocomplete="off" required placeholder="From the server configuration">':''}
+      <div class="error" id="auth-error" role="alert"></div>
+      <button class="primary" type="submit">${mode==='register'?'Create account':mode==='reset'?'Set password':'Sign in'} ${icon('arrow')}</button>
+      <div class="auth-foot">
+        <a href="/app?mode=reset">Forgot password?</a>
+        ${mode==='signin'?'<a href="/app?mode=register">Create account</a>':'<a href="/app?mode=signin">Back to sign in</a>'}
+      </div>
+    </form>
+  </div></div>`;
+ navDropdown();
  document.querySelector('#auth-form').onsubmit=async event=>{
   event.preventDefault();const button=event.target.querySelector('button');button.disabled=true;
-  try{await api(session.setupRequired?'setup':'login',Object.fromEntries(new FormData(event.target)));await start()}
+  const payload=Object.fromEntries(new FormData(event.target));
+  try{
+   if(mode==='register'){await api('register',payload);}
+   else if(mode==='reset'){await api('reset',payload);}
+   else{await api('login',payload);}
+   history.replaceState(null,'','/app');await start()}
   catch(error){document.querySelector('#auth-error').textContent=error.message}finally{button.disabled=false}
  };
 }
@@ -81,9 +178,11 @@ function updateConnection(){const b=document.querySelector('#connection-status')
 setInterval(updateConnection,1000);window.addEventListener('offline',()=>{lastFetched=0;updateConnection()});
 function render(){
  if(!session.authenticated)return;
- const current=nav.find(n=>n[0]===page);const heading={overview:['Your trading. Connected.','Your capital, your accounts and every copied execution.'],accounts:['Every account. One workspace.','Connect an Overlord source, a relay master and as many slaves as your broker and server support.'],rules:['Your strategy. In sync.','Fixed lots at each copy stage. Pending orders, protection and closes follow the upstream account.'],trades:['Every execution tells a story.','Confirmed broker positions and your XAU/USD trading journal.'],analytics:['Understand your edge.','Understand the performance behind every trade.'],activity:['Nothing gets lost.','Account authorizations, rule changes and copy status.'],settings:['Make it yours.','Your connections and private access.']}[page];
- app.innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><span class="mark">${icon('chart')}</span><div>GIMM <b>/</b><small>COPIER ENGINE</small></div></div><div class="workspace-card"><span class="avatar">GH</span><div><p>GIMM Holding</p><small>Personal<br>workspace</small></div><span class="muted" style="margin-left:auto">${icon('shield')}</span></div><div class="nav-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id,name,label])=>`<button class="nav ${page===id?'active':''}" data-page="${id}" ${page===id?'aria-current="page"':''}>${icon(name)}${label}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="connection-card"><span class="status"><i class="dot ${connected()?'':'gray'}"></i><strong>${connected()?'Your accounts. Connected.':'Your strategy. Ready to connect.'}</strong></span><p>${connected()?'cTrader provides confirmed account data. You control your copy rules.':'Connect your private master and slaves through cTrader.'}</p><button class="quiet" data-page="settings">Open connections ${icon('arrow')}</button></div><div class="profile"><span class="avatar">G</span><div><p>Private account</p><small>GIMM Trading</small></div><button class="quiet" data-logout aria-label="Sign out">${icon('logout')}</button></div></div></aside><div class="workspace"><header class="topbar"><div class="breadcrumbs"><button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">${icon('menu')}</button>${icon('grid')}<span>Trading Dashboard</span>${icon('chevron')}<span>${current[2]}</span></div><div class="top-actions"><button id="connection-status" class="status-pill ${connected()?'':'off'}"><i class="dot ${connected()?'':'gray'}" style="display:inline-block;margin-right:5px"></i>${connected()?'Connected':'Not connected'}</button><button id="emergency" class="panic" title="Close all copied positions">${icon('shield')} Emergency stop</button><span class="timezone">${icon('clock')} &nbsp; Europe/Berlin</span><button class="mobile-menu" data-logout aria-label="Sign out">${icon('logout')}</button></div></header><main class="content"><div class="heading"><div><div class="eyebrow">YOUR WORKSPACE / ${current[2].toUpperCase()}</div><h1>${heading[0]}</h1><p>${heading[1]}</p></div><div class="actions"><button id="refresh">${icon('refresh')} Refresh</button>${['overview','accounts','settings'].includes(page)?`<button class="primary" id="connect">${icon('link')} Connect cTrader</button>`:''}${page==='rules'?`<button id="pause" class="${state.paused?'primary':''}">${icon(state.paused?'play':'pause')}${state.paused?'Enable new copies':'Pause new copies'}</button>`:''}${page==='trades'?`<button id="export">${icon('download')} Export CSV</button>`:''}${page==='analytics'?`<button class="primary" data-page="trades">Open journal ${icon('arrow')}</button>`:''}</div></div>${['overview','analytics','trades'].includes(page)?toolbar():''}<div id="live-notice">${notice()}</div>${content()}<footer class="footer"><span>GIMM HOLDING · PRIVATE TRADING INFRASTRUCTURE</span><span>XAU / USD · ${esc(currency)} · Europe/Berlin</span></footer></main></div>${bottomNavigation()}</div>`;
+ document.body.classList.remove('auth-mode');document.body.classList.add('app-mode');
+ const current=nav.find(n=>n[0]===page);const heading={overview:'Overview',accounts:'Trading Accounts',rules:'Copy Engine',trades:'Trade Journal',analytics:'Analytics',activity:'Activity Log',settings:'Settings'}[page];
+ app.innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><span class="mark">${icon('chart')}</span><div>TRADE COPIER <b>/</b><small>ENGINE</small></div></div><div class="workspace-card"><span class="avatar">TG</span><div><p>Trade Copier Engine</p></div><span class="muted" style="margin-left:auto">${icon('shield')}</span></div><div class="nav-label">NAVIGATION</div><nav aria-label="Main navigation">${nav.map(([id,name,label])=>`<button class="nav ${page===id?'active':''}" data-page="${id}" ${page===id?'aria-current="page"':''}>${icon(name)}${label}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="connection-card"><span class="status"><i class="dot ${connected()?'':'gray'}"></i><strong>${connected()?'Your accounts. Connected.':'Your strategy. Ready to connect.'}</strong></span><p>${connected()?'cTrader provides confirmed account data. You control your copy rules.':'Connect your private master and slaves through cTrader.'}</p><button class="quiet" data-page="settings">Open connections ${icon('arrow')}</button></div><div class="profile"><span class="avatar">TG</span><div><p>${esc(session.username||'Tristan Gimm')}</p></div><button class="quiet" data-logout aria-label="Sign out">${icon('logout')}</button></div></div></aside><div class="workspace"><header class="topbar"><div class="breadcrumbs"><button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">${icon('menu')}</button><div class="nav-switch" id="nav-switch"><button type="button" aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu">Navigation<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><div class="menu" id="nav-menu" role="menu" aria-label="Products"><a role="menuitem" href="https://dashboard.gimmholding.com/dashboard" data-port="3000" data-path="/dashboard"><i></i>Master Trading Dashboard</a><a role="menuitem" href="https://quant-engine.gimmholding.com/" data-port="8100" data-path="/"><i></i>Quant Engine</a><span class="current" role="menuitem" aria-current="page"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>Trade Copier Engine</span></div></div>${icon('grid')}<span>${current[2]}</span></div><div class="top-actions"><button id="connection-status" class="status-pill ${connected()?'':'off'}"><i class="dot ${connected()?'':'gray'}" style="display:inline-block;margin-right:5px"></i>${connected()?'Connected':'Not connected'}</button><button id="emergency" class="panic" title="Close all copied positions">${icon('shield')} Emergency stop</button><span class="timezone">${icon('clock')} &nbsp; Europe/Berlin</span><button class="mobile-menu" data-logout aria-label="Sign out">${icon('logout')}</button></div></header><main class="content"><div class="heading"><div><h1>${heading}</h1></div><div class="actions"><button id="refresh">${icon('refresh')} Refresh</button>${['overview','accounts','settings'].includes(page)?`<button class="primary" id="connect">${icon('link')} Connect cTrader</button>`:''}${page==='rules'?`<button id="pause" class="${state.paused?'primary':''}">${icon(state.paused?'play':'pause')}${state.paused?'Enable new copies':'Pause new copies'}</button>`:''}${page==='trades'?`<button id="export">${icon('download')} Export CSV</button>`:''}${page==='analytics'?`<button class="primary" data-page="trades">Open journal ${icon('arrow')}</button>`:''}</div></div>${['overview','analytics','trades'].includes(page)?toolbar():''}<div id="live-notice">${notice()}</div>${content()}<footer class="footer"><span>TRADE COPIER ENGINE</span><span>XAU / USD · ${esc(currency)} · Europe/Berlin</span></footer></main></div>${bottomNavigation()}</div>`;
  bind();
+ navDropdown();
 }
 function toolbar(){
  const currencies=[...new Set(state.accounts.map(a=>a.currency).filter(Boolean))];if(!currencies.length)currencies.push('USD');
@@ -180,7 +279,7 @@ function analytics(){
  return stats+winLoss+`<div class="analytics-charts">${quality}${outcomes}</div>`+minis+`<section class="card" style="margin-top:22px"><div class="card-head"><div><h2>Performance by account</h2><p>Compare accounts within the same currency · ${esc(currency)}</p></div>${icon('chart')}</div>${selectedAccounts().length?'<div class="metrics-list">'+selectedAccounts().map(a=>{const results=trades.filter(t=>t.account_id===a.id);const total=results.length?sum(results):null;const max=Math.max(1,...selectedAccounts().map(x=>Math.abs(sum(trades.filter(t=>t.account_id===x.id)))));return `<div class="metrics-item"><div class="split"><span>${esc(a.name)} · ${results.length} trades</span><span class="${tone(total)}">${signed(total)}</span></div><div class="progress"><span style="width:${Math.abs(total||0)/max*100}%;background:${total<0?'var(--red)':'var(--green)'}"></span></div></div>`}).join('')+'</div>':empty('Your trades build your performance.','No sample data or invented performance score. Connect your accounts to populate these analytics.','chart',true)}<div class="scroll-note">All time covers imported history, starting with the last 90 days. Metrics use fully closed positions and reported net closing results; open partial positions are excluded. Max Drawdown measures realized P&L drawdown, not intraday equity drawdown.</div></section>`;
 }
 function qualityMetrics(){const done=state.commands.filter(c=>['confirmed','reconciled'].includes(c.status)).length;const uncertain=state.commands.filter(c=>c.status==='uncertain').length;const failed=state.commands.filter(c=>c.status==='rejected').length;const active=state.mappings.filter(m=>m.status==='active').length;const latency=state.mappings.map(m=>m.latency_ms).filter(Number.isFinite).sort((a,b)=>a-b);return `<div class="metrics-list">${[['Confirmed commands',String(done),state.commands.length?done/state.commands.length*100:0,'var(--purple)'],['Active position mappings',String(active),state.mappings.length?active/state.mappings.length*100:0,'var(--green)'],['Uncertain executions',String(uncertain),state.commands.length?uncertain/state.commands.length*100:0,'var(--amber)'],['Rejected commands',String(failed),state.commands.length?failed/state.commands.length*100:0,'var(--red)']].map(([label,value,width,color])=>`<div class="metrics-item"><div class="split"><span>${label}</span><span>${value}</span></div><div class="progress"><span style="width:${width}%;background:${color}"></span></div></div>`).join('')}<div class="legend-row"><span>Median Order-Roundtrip</span><span>${latency.length?number(latency[Math.floor(latency.length/2)],0)+' ms':'—'}</span></div><small style="font-size:9px;line-height:1.8">Based on the last ${state.commands.length} commands. Uncertain executions are reconciled, never blindly repeated.</small></div>`}
-function settingsView(){return `<div class="rule-grid"><section class="card settings-block"><div class="toggle-row"><h2>cTrader Open API</h2>${icon('link')}</div><p class="muted">Status: ${state.configured?'App configured':'App not configured'}</p><p>Register your app in the cTrader Open API portal. Set the client ID and client secret in your server environment. Keep the encryption key on the server as well.</p><p><a class="text-link" href="https://openapi.ctrader.com" target="_blank" rel="noopener noreferrer">cTrader Open API Portal ↗</a></p><p class="muted">Register this redirect URI in your app:</p><p><code>${esc(location.origin+'/ctrader/callback')}</code></p><p class="muted">Access requires trading permission. You can authorize multiple cTrader IDs to support separate Pepperstone and FTMO logins.</p><button class="primary" data-connect ${state.configured?'':'disabled'} style="margin-top:20px">${icon('link')} Authorize accounts</button></section><section class="card settings-block"><h2>Private workspace</h2><p>Administrator: <span class="accent">${esc(session.email)}</span></p><p class="muted">Server-side sessions · HttpOnly cookies · CSRF protection · encrypted cTrader tokens</p><p>Domain: <code>copier-engine.gimmholding.com</code></p><button id="change-password" style="margin-top:20px">${icon('shield')} Change password</button></section></div><section class="card" style="margin-top:22px"><div class="card-head"><div><h2>Available cTrader accounts</h2><p>Accounts authorized through cTrader · loaded automatically after connecting</p></div><button id="add" ${state.discovered.length?'':'disabled'}>${icon('plus')} Add account</button></div>${state.discovered.length?`<div class="table-wrap"><table><thead><tr><th>LOGIN</th><th>BROKER</th><th>ENVIRONMENT</th><th>ASSIGNMENT</th></tr></thead><tbody>${state.discovered.map(a=>`<tr><td>#${esc(a.login||a.broker_id)}</td><td>${esc(a.broker||'cTrader')}</td><td>${a.environment==='live'?'Live':'Broker-Demo'}</td><td>${esc(state.accounts.find(x=>x.id===a.id)?.name||'Not assigned')}</td></tr>`).join('')}</tbody></table></div>`:empty('No account authorization yet.','Connect cTrader using the button above, then assign the discovered accounts.','accounts',true)}</section>`}
+function settingsView(){return `<div class="rule-grid"><section class="card settings-block"><div class="toggle-row"><h2>cTrader Open API</h2>${icon('link')}</div><p class="muted">Status: ${state.configured?'App configured':'App not configured'}</p><p>Register your app in the cTrader Open API portal. Set the client ID and client secret in your server environment. Keep the encryption key on the server as well.</p><p><a class="text-link" href="https://openapi.ctrader.com" target="_blank" rel="noopener noreferrer">cTrader Open API Portal ↗</a></p><p class="muted">Register this redirect URI in your app:</p><p><code>${esc(location.origin+'/ctrader/callback')}</code></p><p class="muted">Access requires trading permission. You can authorize multiple cTrader IDs to support separate Pepperstone and FTMO logins.</p><button class="primary" data-connect ${state.configured?'':'disabled'} style="margin-top:20px">${icon('link')} Authorize accounts</button></section><section class="card settings-block"><p>Administrator: <span class="accent">${esc(session.username||'')}</span></p><p class="muted">Server-side sessions · HttpOnly cookies · CSRF protection · encrypted cTrader tokens</p><p>Domain: <code>copier-engine.gimmholding.com</code></p><button id="change-password" style="margin-top:20px">${icon('shield')} Change password</button></section></div><section class="card" style="margin-top:22px"><div class="card-head"><div><h2>Available cTrader accounts</h2><p>Accounts authorized through cTrader · loaded automatically after connecting</p></div><button id="add" ${state.discovered.length?'':'disabled'}>${icon('plus')} Add account</button></div>${state.discovered.length?`<div class="table-wrap"><table><thead><tr><th>LOGIN</th><th>BROKER</th><th>ENVIRONMENT</th><th>ASSIGNMENT</th></tr></thead><tbody>${state.discovered.map(a=>`<tr><td>#${esc(a.login||a.broker_id)}</td><td>${esc(a.broker||'cTrader')}</td><td>${a.environment==='live'?'Live':'Broker-Demo'}</td><td>${esc(state.accounts.find(x=>x.id===a.id)?.name||'Not assigned')}</td></tr>`).join('')}</tbody></table></div>`:empty('No account authorization yet.','Connect cTrader using the button above, then assign the discovered accounts.','accounts',true)}</section>`}
 function exposureStats(){
  const accounts=selectedAccounts(),margin=sumKnown(accounts,'margin'),equity=sumKnown(accounts,'equity');
  const positions=state.positions.filter(p=>accounts.some(a=>a.id===p.account_id&&a.symbol_id===p.symbol_id));
@@ -251,4 +350,5 @@ async function handleCallback(){
  }
 }
 function exportTrades(){const trades=filteredTrades();const rows=[['Account','Position','Closed at','Net PnL','Currency'],...trades.map(t=>[state.accounts.find(a=>a.id===t.account_id)?.name,t.position_id,new Date(t.timestamp).toISOString(),t.net,currency])];const csv=rows.map(row=>row.map(v=>'"'+String(v??'').replace(/^[=+@-]/,"'").replaceAll('"','""')+'"').join(';')).join('\r\n');const url=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='gimm-trades.csv';a.click();URL.revokeObjectURL(url);toast(trades.length+' trades exported.')}
+backdrop();
 start();
