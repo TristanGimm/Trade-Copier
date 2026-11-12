@@ -50,6 +50,14 @@ class Handler(SimpleHTTPRequestHandler):
         # Callback query contains a short-lived authorization code. Never log it.
         print('%s %s %s'%(self.address_string(),self.command,urlparse(self.path).path))
     def end_headers(self):
+        # Static files are served with a modification time but no cache policy,
+        # and browsers then invent one. That is how a deploy kept showing the
+        # previous UI: HTML is never cached, and CSS/JS must revalidate.
+        path=urlparse(self.path).path
+        if path.endswith(('.css','.js')):
+            self.send_header('Cache-Control','no-cache, must-revalidate')
+        elif not path.startswith('/api/') and not path.endswith(('.mp4','.jpg','.png','.svg','.ico')):
+            self.send_header('Cache-Control','no-store')
         self.send_header('X-Content-Type-Options','nosniff');self.send_header('X-Frame-Options','DENY')
         self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
@@ -87,10 +95,14 @@ class Handler(SimpleHTTPRequestHandler):
         if path=='/':
             # Anonymous visitors see the shared landing page; the application
             # itself lives at /app so the landing can stay a plain marketing
-            # screen with no session data on it. A signed-in visitor gets the
-            # app directly -- delegating to '/app' as a static path would 404,
-            # because the app is index.html, not a file called 'app'.
-            self.path='/index.html' if self.session() else '/landing.html'
+            # screen with no session data on it. A signed-in visitor is sent to
+            # /app rather than served the app at '/', so the address bar always
+            # says which of the two screens is on display.
+            if self.session():
+                self.send_response(302);self.send_header('Location','/app')
+                self.send_header('Cache-Control','no-store');self.end_headers()
+                return
+            self.path='/landing.html'
             return super().do_GET()
         if path=='/login':
             # Alias so the three products share one sign-in URL shape.
